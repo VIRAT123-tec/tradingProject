@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # algo_platform
 
 An automated options trading platform that runs a **short straddle** strategy on
@@ -124,3 +125,6 @@ See [`docs/modules.md`](docs/modules.md) and
 Python 3.11+ · PostgreSQL · SQLAlchemy 2.0 (sync) · Pydantic v2 · Alembic ·
 KiteConnect · pytest. Thread-based concurrency (no asyncio). Money is always
 `Decimal`, never `float`.
+=======
+# tradingProject
+>>>>>>> de04499030a0c71ae6466e0bc438f3d1d049f9b4
