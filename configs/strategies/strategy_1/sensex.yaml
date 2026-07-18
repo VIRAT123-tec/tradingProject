@@ -1,0 +1,29 @@
+# Strategy-1 (short straddle) parameters for SENSEX.
+# Validated at startup against Strategy1Config -- an invalid or missing value
+# here fails the process at boot, not at 09:20 when an order is due.
+#
+# target_pct/sl_pct, lots, and product_type are placeholder values pending
+# explicit sign-off before any live/paper run -- see the project's standing
+# instruction to confirm real percentages/sizing rather than accept a guess.
+# Sensex's weekly expiry weekday differs from Nifty's -- that is resolved by
+# ExpiryService, not anything in this file.
+
+entry_time: "09:20:00"
+hard_cutoff_time: "15:30:00"
+
+target_pct: "0.10"
+sl_pct: "0.10"
+
+lots: 1
+product_type: INTRADAY
+skip_on_expiry_day: true
+
+monitoring_interval_seconds: 120
+polling_interval_seconds: 2
+
+retry:
+  order_timeout_seconds: null
+  fill_confirmation_attempts: 20
+  fill_confirmation_delay_seconds: 0.25
+  close_retry_attempts: 3
+  close_retry_delay_seconds: 0.5

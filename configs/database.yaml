@@ -1,0 +1,16 @@
+# Database connection-pool tuning (non-secret). The actual connection
+# string, including credentials, comes from the DATABASE_URL environment
+# variable (see .env) -- never from this file. Every value below has a safe
+# default in database/database.py's DatabasePoolSettings, so this file may be
+# partially filled, empty, or absent; whatever is set here overrides the
+# default for that field only.
+
+pool_size: 5
+max_overflow: 10
+pool_timeout: 30
+pool_recycle: 1800
+pool_pre_ping: true
+echo: false
+connect_timeout: 10
+statement_timeout_ms: 30000
+application_name: algo_platform

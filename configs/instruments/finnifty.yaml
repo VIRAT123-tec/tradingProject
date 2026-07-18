@@ -1,0 +1,17 @@
+# FINNIFTY instrument definition. See algo.services.live_seams.InstrumentConfig.
+#
+# ⚠️ CONFIRM every value against current exchange contract specs before any
+# live run. Values below were read from the live Kite instrument dump
+# (client.instruments("NFO")) on 2026-07-14 -- re-verify before trusting.
+#
+# FINNIFTY no longer lists WEEKLY options (NSE discontinued them): only
+# MONTHLY expiries exist, on the LAST TUESDAY of each month
+# (e.g. 2026-07-28, 2026-08-25, 2026-09-29). Hence expiry_cadence: monthly.
+exchange: NFO                    # options trade on NFO
+strike_interval: "50"
+lot_size: 60
+tick_size: "0.05"
+spot_exchange: NSE               # underlying index spot on the NSE cash segment
+spot_symbol: "NIFTY FIN SERVICE" # Kite's spot tradingsymbol for the index
+expiry_cadence: monthly
+expiry_weekday: 1                # 0=Mon..6=Sun; 1=Tuesday (last Tuesday of the month)

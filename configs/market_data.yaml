@@ -1,0 +1,12 @@
+# Market data settings. See algo.market_data.market_data_service.MarketDataConfig.
+freshness_seconds: 5.0
+poll_timeout_seconds: null
+
+# Resilience of the pull (REST) fallback used when the live websocket is stale.
+# A poll is a side-effect-free read, so transient Kite REST failures (HTTP
+# 5xx, read timeouts, dropped connections, malformed/JSON responses) are
+# retried with exponential backoff; only a sustained outage is escalated.
+poll_retry_attempts: 3                 # attempts per poll on a transient error (1 = no retry)
+poll_retry_backoff_seconds: 0.5        # first backoff wait; doubles each retry
+poll_retry_max_backoff_seconds: 8.0    # cap on any single backoff wait
+poll_failure_escalation_threshold: 5   # consecutive failed cycles tolerated quietly before ERROR (CRITICAL at 2x)

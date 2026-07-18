@@ -1,0 +1,60 @@
+# Options Market Data Collector configuration.
+# See algo.market_data_collector.config.CollectorConfig. Validated at startup --
+# an invalid value fails the process at boot, not mid-session.
+#
+# This file is the ONLY place collector behaviour is configured. Nothing is
+# hardcoded in code: add instruments, widen the ATM window, change the tick
+# mode, tune the writer -- all here.
+
+# Env var name holding the TimescaleDB (or plain Postgres) connection string for
+# the SEPARATE market-data database. Kept out of YAML per the no-secrets rule.
+db_url_env: "MARKET_DATA_DATABASE_URL"
+
+# Underlyings to collect. Add BANKNIFTY / FINNIFTY / MIDCPNIFTY / SENSEXBANK here
+# to collect them too -- no code change. Each must have a configs/instruments/
+# <name>.yaml (reused from trading) for its strike interval / exchange / spot
+# symbol / expiry cadence.
+underlyings:
+  - NIFTY
+  - SENSEX
+
+# The ATM window: this many strikes below AND above ATM (plus ATM itself) ->
+# (2*strikes_each_side + 1) strikes x {CE, PE} instruments per underlying.
+strikes_each_side: 10
+
+# Kite subscription richness: FULL (ltp+ohlc+volume+oi+5-level depth) |
+# QUOTE (ltp+ohlc+volume+oi) | LTP (last price only).
+tick_mode: FULL
+
+# How often to recompute ATM and rotate the subscription window (seconds).
+recompute_interval_seconds: 30
+
+writer:
+  batch_size: 5000            # flush after this many queued ticks...
+  flush_interval_ms: 1000     # ...or this long since the last flush, whichever first
+  queue_max: 200000           # bounded queue; overflow handled below
+  overflow_policy: drop_oldest  # drop_oldest | drop_newest
+  use_copy: true              # COPY bulk insert (fastest); false -> batched INSERT
+  db_retry_base_seconds: 0.5  # writer backoff when the DB is unreachable
+  db_retry_max_seconds: 10.0
+
+# Automatic trading-session lifecycle (IST). Holiday-aware via the trading
+# calendar. No manual start/stop needed.
+market_hours:
+  connect: "09:14"          # open the websocket
+  start: "09:15"            # begin ATM loop + subscriptions
+  stop_subscribe: "15:30"   # freeze the window (stop adding/rotating)
+  flush: "15:31"            # drain the queue to the database
+  disconnect: "15:32"       # close the websocket
+  idle_poll_seconds: 30     # how often the session controller checks the clock
+
+metrics:
+  interval_seconds: 60      # render the "Collector Status" block this often
+
+timescale:
+  chunk_interval: "1 day"
+  compression_after: "7 days"
+  retention: null           # null = keep forever
+  continuous_aggregates:    # (interval) OHLCV+OI rollups built if Timescale present
+    - "1 minute"
+    - "5 minutes"

@@ -1,0 +1,15 @@
+# SENSEX instrument definition. See algo.services.live_seams.InstrumentConfig.
+#
+# ⚠️ CONFIRM every value against current exchange contract specs before any
+# live run. Sensex's expiry weekday differs from Nifty's -- do not assume
+# shared logic -- and has itself changed; validate before trusting it.
+exchange: BFO              # options trade on BFO
+strike_interval: "100"
+lot_size: 20
+tick_size: "0.05"
+spot_exchange: BSE         # underlying index spot lives on the BSE cash segment
+spot_symbol: "SENSEX"      # Kite's spot tradingsymbol for the index
+expiry_weekday: 3          # 0=Mon..6=Sun; 3=Thursday. Verified 2026-07-10 directly
+                            # against client.instruments("BFO") -- next real SENSEX
+                            # weekly expiries land on Thursdays (2026-07-16/23/30).
+                            # BSE has changed this before; re-verify periodically.

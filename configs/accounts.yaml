@@ -1,0 +1,8 @@
+# Trading account definitions. See algo.dependency_container.AccountsConfig.
+# Single account for v1, per project scope -- the schema (a list) stays open
+# to add more accounts later without a rewrite.
+accounts:
+  - name: primary
+    broker: KITE
+    broker_client_id: VGA323  # SIMULATION accounts have no real broker-side identity
+    display_name: "Virat Zerodha"

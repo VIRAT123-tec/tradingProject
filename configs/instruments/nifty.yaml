@@ -1,0 +1,15 @@
+# NIFTY instrument definition. See algo.services.live_seams.InstrumentConfig.
+#
+# ⚠️ CONFIRM every value against current exchange contract specs before any
+# live run -- lot size, strike interval, and (especially) the weekly-expiry
+# weekday change periodically. These must never be trusted blindly.
+exchange: NFO              # options trade on NFO
+strike_interval: "50"
+lot_size: 75
+tick_size: "0.05"
+spot_exchange: NSE         # underlying index spot lives on the NSE cash segment
+spot_symbol: "NIFTY 50"    # Kite's spot tradingsymbol for the index
+expiry_weekday: 1          # 0=Mon..6=Sun; 1=Tuesday. Verified 2026-07-10 directly
+                            # against client.instruments("NFO") -- next real NIFTY
+                            # weekly expiries land on Tuesdays (2026-07-14/21/28).
+                            # NSE has changed this before; re-verify periodically.

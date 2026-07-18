@@ -1,0 +1,53 @@
+# Broker selection and tuning. See algo.dependency_container.BrokersConfig.
+#
+# active_broker selects which of the two blocks below is actually
+# constructed; both blocks are always required regardless, so switching
+# brokers is a one-line edit here, never a YAML restructuring.
+# SAFE-BY-DEFAULT: committed as SIMULATION. Going live requires deliberately
+# changing this to KITE *and* populating the real environment variables named
+# below -- never both at once by accident.
+active_broker: SIMULATION
+
+# Every RateLimitCategory must be present -- RateLimitedBroker treats an
+# absent category as unthrottled, so an incomplete list here is a config bug,
+# not a safe default. PLACEHOLDER values pending confirmation against Kite's
+# actual published rate limits before any live use.
+rate_limits:
+  ORDER_MUTATION:
+    max_calls: 10
+    per_seconds: 1.0
+  ORDER_READ:
+    max_calls: 10
+    per_seconds: 1.0
+  PORTFOLIO_READ:
+    max_calls: 10
+    per_seconds: 1.0
+  MARKET_DATA:
+    max_calls: 10
+    per_seconds: 1.0
+  INSTRUMENT_LOOKUP:
+    max_calls: 3
+    per_seconds: 1.0
+  GENERAL:
+    max_calls: 10
+    per_seconds: 1.0
+
+simulation:
+  synchronous: false
+  initial_cash: "10000000"
+  connection_failure_probability: 0.0
+  rejection_probability: 0.0
+  partial_fill_probability: 0.0
+  ack_latency_seconds: 0.05
+  fill_latency_seconds: 0.2
+
+kite:
+  # Names of environment variables -- never literal credentials.
+  api_key_env_var: "KITE_API_KEY"
+  api_secret_env_var: "KITE_API_SECRET"
+  access_token_env_var: "KITE_ACCESS_TOKEN"
+  read_retry_attempts: 3
+  read_retry_delay_seconds: 0.5
+  quote_batch_size: 200
+  request_timeout_seconds: 7.0   # socket timeout bounding every Kite call, incl. order placement
+

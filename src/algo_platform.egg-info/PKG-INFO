@@ -1,0 +1,24 @@
+Metadata-Version: 2.4
+Name: algo-platform
+Version: 0.1.0
+Summary: Production algorithmic trading platform (Kite / Nifty & Sensex).
+Requires-Python: >=3.11
+Requires-Dist: pydantic==2.11.7
+Requires-Dist: pydantic-settings==2.10.1
+Requires-Dist: PyYAML==6.0.2
+Requires-Dist: python-dotenv==1.1.1
+Requires-Dist: SQLAlchemy==2.0.41
+Requires-Dist: alembic==1.16.4
+Requires-Dist: psycopg2-binary
+Requires-Dist: pandas==2.3.1
+Requires-Dist: numpy==2.3.1
+Requires-Dist: requests==2.32.4
+Requires-Dist: websockets==15.0.1
+Requires-Dist: kiteconnect==5.0.1
+Requires-Dist: pyotp==2.9.0
+Requires-Dist: tenacity==9.1.2
+Requires-Dist: python-dateutil==2.9.0.post0
+Requires-Dist: pytz==2025.2
+Provides-Extra: dev
+Requires-Dist: pytest==8.4.1; extra == "dev"
+Requires-Dist: pytest-cov==6.2.1; extra == "dev"

@@ -1,0 +1,37 @@
+# Platform/account-level risk configuration for RiskCore.
+# Validated at startup against RiskCoreConfig -- an invalid or missing value
+# here fails the process at boot, not when the first entry is due.
+#
+# max_daily_entries_per_account, margin_per_lot_by_instrument, and
+# daily_loss_limit_by_account are placeholder values pending explicit sign-off
+# before any live/paper run -- margin_per_lot_by_instrument in particular is a
+# rough pre-trade sufficiency estimate, not a real broker SPAN margin
+# calculation.
+
+market_open_time: "09:15:00"
+market_close_time: "15:30:00"
+
+# Raised from 2 to 6: six Strategy-1 instances (NIFTY, SENSEX, BANKNIFTY,
+# FINNIFTY, MIDCPNIFTY, SENSEXBANK) run under the single 'primary' account, and
+# this limit counts positions per account per day -- at 2 the 3rd..6th entries
+# would be risk-blocked. Set to the instance count.
+max_daily_entries_per_account: 6
+legs_per_entry: 2
+
+# ⚠️ PLACEHOLDER pre-trade margin estimates (per lot), NOT real SPAN margins --
+# every value here is pending explicit sign-off before any live run, exactly
+# like the original NIFTY/SENSEX entries. RiskCore rejects entry for any traded
+# instrument missing from this map, so all six must be present.
+margin_per_lot_by_instrument:
+  NIFTY: "50000"
+  SENSEX: "70000"
+  BANKNIFTY: "150000"
+  FINNIFTY: "130000"
+  MIDCPNIFTY: "130000"
+  SENSEXBANK: "150000"
+
+# ⚠️ REVIEW: with six instruments now trading under one account, aggregate
+# intraday exposure is larger than when this was sized for two. Not a hard
+# entry blocker (it halts only after realized losses reach it), so left
+# unchanged pending your risk sign-off rather than guessed.
+daily_loss_limit_by_account: "25000"

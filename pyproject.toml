@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "algo-platform"
+version = "0.1.0"
+description = "Production algorithmic trading platform (Kite / Nifty & Sensex)."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic==2.11.7",
+    "pydantic-settings==2.10.1",
+    "PyYAML==6.0.2",
+    "python-dotenv==1.1.1",
+    "SQLAlchemy==2.0.41",
+    "alembic==1.16.4",
+    "psycopg2-binary==2.9.12",
+    "pandas==2.3.1",
+    "numpy==2.3.1",
+    "requests==2.32.4",
+    "websockets==15.0.1",
+    "kiteconnect==5.0.1",
+    "pyotp==2.9.0",
+    "tenacity==9.1.2",
+    "python-dateutil==2.9.0.post0",
+    "pytz==2025.2",
+    "openpyxl==3.1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.1",
+    "pytest-cov==6.2.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/algo/tests"]

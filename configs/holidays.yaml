@@ -1,0 +1,2 @@
+# TODO: exchange holiday calendar (NSE/BSE), used by holiday_service.py to
+# prevent entry logic from running on non-trading days.

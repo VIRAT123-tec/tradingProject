@@ -1,0 +1,42 @@
+# Top-level platform settings. See algo.dependency_container.AppConfig.
+#
+# environment: for logging/alerting context only -- has no effect on which
+# broker is used (that is brokers.yaml's active_broker, set independently).
+environment: "development"
+log_level: "INFO"
+
+# Every (strategy, instrument, account) combination the platform should run.
+# "account" references a name declared in accounts.yaml.
+#
+# instrument casing must match the platform-wide convention (uppercase, e.g.
+# "NIFTY"/"SENSEX") -- this is the identity string RiskCore looks up in
+# risk.yaml's margin_per_lot_by_instrument via an exact-match dict lookup, not
+# a case-insensitive one, and the string every strike_selector/entry_logic/
+# risk_core test fixture in this codebase already uses. ParameterLoader
+# lowercases it only internally, when resolving the strategy config file path
+# (configs/strategies/strategy_1/nifty.yaml).
+instances:
+  - strategy_id: strategy_1
+    instrument: NIFTY
+    account: primary
+  - strategy_id: strategy_1
+    instrument: SENSEX
+    account: primary
+  - strategy_id: strategy_1
+    instrument: BANKNIFTY
+    account: primary
+  - strategy_id: strategy_1
+    instrument: FINNIFTY
+    account: primary
+  - strategy_id: strategy_1
+    instrument: MIDCPNIFTY
+    account: primary
+  - strategy_id: strategy_1
+    instrument: SENSEXBANK
+    account: primary
+
+# Directory for the per-day trade report .xlsx files (one file per trading
+# day, one row per option leg), written after each position closes. Relative
+# paths resolve against the process working directory. Remove this key (or set
+# it null) to disable trade-report export entirely.
+report_output_dir: "reports"

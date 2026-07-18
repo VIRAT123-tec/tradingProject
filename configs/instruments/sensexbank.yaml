@@ -1,0 +1,23 @@
+# SENSEXBANK instrument definition. See algo.services.live_seams.InstrumentConfig.
+#
+# ⚠️ CONFIRM every value against current exchange contract specs before any
+# live run. Values below were read from the live Kite instrument dump
+# (client.instruments("BFO")) on 2026-07-14 -- re-verify before trusting.
+#
+# "SENSEXBANK" is this platform's display identity (used in the database, logs,
+# and reports as BFO:SENSEXBANK...). BSE's bank index trades under the contract
+# name "BANKEX" in Kite's dump -- underlying_symbol maps the identity to that
+# name for contract lookup only.
+#
+# BANKEX no longer lists WEEKLY options (BSE discontinued them): only MONTHLY
+# expiries exist, on the LAST THURSDAY of each month (e.g. 2026-07-30,
+# 2026-08-27, 2026-09-24). Hence expiry_cadence: monthly.
+exchange: BFO              # options trade on BFO
+strike_interval: "100"
+lot_size: 30
+tick_size: "0.05"
+spot_exchange: BSE         # underlying index spot lives on the BSE cash segment
+spot_symbol: "BANKEX"      # Kite's spot tradingsymbol for the index
+underlying_symbol: BANKEX  # contract/dump name (identity 'SENSEXBANK' != 'BANKEX')
+expiry_cadence: monthly
+expiry_weekday: 3          # 0=Mon..6=Sun; 3=Thursday (last Thursday of the month)
