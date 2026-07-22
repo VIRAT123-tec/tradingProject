@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from algo.common.enums import OptionType, OrderPurpose, OrderStatus, PositionState
+from algo.common.utilities import pnl_per_share
 from algo.database.models.trade_history import TradeHistory
 from algo.database.repositories.account_repository import AccountRepository
 from algo.database.repositories.order_repository import OrderRepository
@@ -153,6 +154,7 @@ class TradeHistoryRecorder:
             exit_spot_ltp=None,  # not persisted by execution yet (later phase)
             exit_reason=position.exit_reason,
             realized_pnl=position.realized_pnl,
+            pnl_per_share=pnl_per_share(position.realized_pnl, position.lot_size),
             profit_percent=_profit_percent(position),
             max_profit_seen=None,  # not persisted by monitoring yet (later phase)
             max_loss_seen=None,

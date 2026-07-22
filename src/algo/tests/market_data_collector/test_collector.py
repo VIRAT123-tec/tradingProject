@@ -21,6 +21,7 @@ from algo.market_data_collector.atm_window import AtmWindowManager
 from algo.market_data_collector.config import (
     CollectorConfig,
     MarketHoursConfig,
+    ReconnectConfig,
     WriterConfig,
     load_collector_config,
 )
@@ -143,15 +144,18 @@ class FakeTicker:
     MODE_FULL = "full"
 
     def __init__(self):
-        self.on_ticks = self.on_connect = self.on_close = self.on_error = self.on_reconnect = None
+        self.on_ticks = self.on_connect = self.on_close = None
+        self.on_error = self.on_reconnect = self.on_noreconnect = None
         self.subscribed: list[int] = []
         self.modes: list[tuple] = []
         self.connected_called = False
+        self.closed = False
 
     def connect(self, threaded=True, **kw):
         self.connected_called = True
 
-    def close(self, *a, **k): ...
+    def close(self, *a, **k):
+        self.closed = True
     def subscribe(self, tokens): self.subscribed += tokens
     def unsubscribe(self, tokens): self.subscribed = [t for t in self.subscribed if t not in tokens]
     def set_mode(self, mode, tokens): self.modes.append((mode, tuple(tokens)))
@@ -204,6 +208,237 @@ class TestTickStream:
         fake.subscribed.clear()  # socket "forgot"
         fake.on_connect(None, {})  # reconnect re-applies
         assert set(fake.subscribed) == {201, 202}
+
+
+# --------------------------------------------------------------------------
+# Self-healing at the stream level: on_noreconnect + brand-new-ticker restart
+# --------------------------------------------------------------------------
+
+
+class TestTickStreamRecovery:
+    def _stream(self):
+        made: list[FakeTicker] = []
+
+        def factory():
+            t = FakeTicker()
+            made.append(t)
+            return t
+
+        stream = CollectorTickStream(ticker_factory=factory, mode="FULL", on_tick=lambda _t: None)
+        return stream, made
+
+    def test_on_noreconnect_marks_dead_and_disconnected(self):
+        stream, made = self._stream()
+        stream.start()
+        made[0].on_connect(None, {})
+        assert stream.is_dead() is False and stream.is_connected() is True
+        made[0].on_noreconnect(made[0])  # KiteTicker permanently gives up
+        assert stream.is_dead() is True and stream.is_connected() is False
+
+    def test_restart_builds_brand_new_ticker_and_closes_old(self):
+        stream, made = self._stream()
+        stream.start()
+        made[0].on_connect(None, {})
+        made[0].on_noreconnect(made[0])  # socket dies
+
+        stream.restart()
+
+        assert len(made) == 2 and made[1] is not made[0]  # a completely fresh object
+        assert made[0].closed is True                     # dead one torn down
+        assert made[1].connected_called is True           # fresh connect issued
+        assert stream.is_dead() is False
+
+    def test_restart_preserves_subscriptions_and_resubscribes_on_connect(self):
+        stream, made = self._stream()
+        stream.start()
+        made[0].on_connect(None, {})
+        stream.subscribe([101, 102])
+        assert set(made[0].subscribed) == {101, 102}
+
+        made[0].on_noreconnect(made[0])
+        stream.restart()
+        # New socket hasn't connected yet: nothing pushed, but the intent is kept.
+        assert made[1].subscribed == []
+        assert stream.subscribed_count == 2
+
+        made[1].on_connect(None, {})  # fresh socket connects
+        assert set(made[1].subscribed) == {101, 102}  # all instruments re-subscribed
+        assert ("full", (101, 102)) in [(m, tuple(sorted(t))) for m, t in made[1].modes]
+
+
+# --------------------------------------------------------------------------
+# Self-healing at the service level: the controller-loop watchdog
+# --------------------------------------------------------------------------
+
+
+class WatchdogStream:
+    """Minimal stream exposing exactly what the watchdog reads/drives."""
+
+    def __init__(self):
+        self.connected = False
+        self.dead = False
+        self.restarts = 0
+        self.subs: list[int] = []
+
+    def start(self):
+        self.connected = True
+
+    def stop(self):
+        self.connected = False
+
+    def restart(self):
+        self.restarts += 1
+        self.dead = False
+        self.connected = False  # fresh socket starts out reconnecting
+
+    def is_connected(self):
+        return self.connected
+
+    def is_dead(self):
+        return self.dead
+
+    def subscribe(self, tokens):
+        self.subs += tokens
+
+    def unsubscribe(self, tokens):
+        self.subs = [t for t in self.subs if t not in tokens]
+
+    @property
+    def subscribed_count(self):
+        return len(self.subs)
+
+
+class TestWatchdog:
+    def _svc(self, stream, **rc):
+        from algo.market_data_collector.collector_service import CollectorService
+
+        reconnect = ReconnectConfig(
+            grace_seconds=rc.get("grace", 10.0),
+            restart_backoff_seconds=rc.get("backoff", 1.0),
+            heartbeat_warning_seconds=rc.get("warn", 5.0),
+            heartbeat_critical_seconds=rc.get("crit", 10.0),
+        )
+        eng = _sqlite()
+        atm = AtmWindowManager(
+            instrument_service=FakeInstrService(), expiry_resolver=lambda u, d: date(2026, 7, 21),
+            spot_source=lambda u: Decimal("24000"), chain_source=_chain, strikes_each_side=10,
+        )
+        writer = TickWriter(engine=eng, config=WriterConfig(use_copy=False))
+        metrics = CollectorMetrics(stream=stream, writer=writer, atm=atm, underlyings=["NIFTY"])
+        svc = CollectorService(
+            config=CollectorConfig(underlyings=["NIFTY"], strikes_each_side=10, reconnect=reconnect),
+            engine=eng, stream=stream, writer=writer, atm=atm, metrics=metrics,
+            market_hours=MarketHoursController(MarketHoursConfig(), FakeCalendar()),
+            time_provider=FakeClock(),
+        )
+        return svc, metrics
+
+    def test_disconnect_within_grace_does_not_restart(self):
+        stream = WatchdogStream()
+        svc, _ = self._svc(stream)
+        stream.connected = True
+        svc._watchdog(Phase.COLLECT, mono=100.0)   # healthy baseline
+        stream.connected = False                    # internet lost
+        svc._watchdog(Phase.COLLECT, mono=101.0)    # disconnect noticed
+        svc._watchdog(Phase.COLLECT, mono=108.0)    # 7s < grace(10)
+        assert stream.restarts == 0
+
+    def test_long_disconnect_triggers_rebuild(self):
+        stream = WatchdogStream()
+        svc, _ = self._svc(stream)
+        stream.connected = True
+        svc._watchdog(Phase.COLLECT, mono=100.0)
+        stream.connected = False
+        svc._watchdog(Phase.COLLECT, mono=101.0)    # disconnected_since = 101
+        svc._watchdog(Phase.COLLECT, mono=112.0)    # 11s >= grace(10) -> rebuild
+        assert stream.restarts == 1
+
+    def test_on_noreconnect_restarts_immediately(self):
+        stream = WatchdogStream()
+        svc, _ = self._svc(stream)
+        stream.connected = True
+        svc._watchdog(Phase.COLLECT, mono=100.0)
+        stream.connected = False
+        stream.dead = True                          # KiteTicker gave up
+        svc._watchdog(Phase.COLLECT, mono=101.0)    # immediate, no grace wait
+        assert stream.restarts == 1
+
+    def test_restart_backoff_prevents_thrashing(self):
+        stream = WatchdogStream()
+        svc, _ = self._svc(stream, backoff=5.0)
+        stream.connected = False
+        stream.dead = True
+        svc._watchdog(Phase.COLLECT, mono=100.0)    # restart #1
+        stream.dead = True                          # still dead after rebuild
+        svc._watchdog(Phase.COLLECT, mono=102.0)    # 2s < backoff(5) -> suppressed
+        assert stream.restarts == 1
+        svc._watchdog(Phase.COLLECT, mono=106.0)    # 6s >= backoff -> restart #2
+        assert stream.restarts == 2
+
+    def test_frozen_reactor_warns_then_restarts(self):
+        stream = WatchdogStream()
+        svc, metrics = self._svc(stream, warn=5.0, crit=10.0)
+        stream.connected = True                     # connected but NO ticks ever
+        svc._watchdog(Phase.COLLECT, mono=100.0)    # connected_since = 100
+        svc._watchdog(Phase.COLLECT, mono=106.0)    # 6s idle -> WARNING, no restart
+        assert stream.restarts == 0
+        svc._watchdog(Phase.COLLECT, mono=111.0)    # 11s idle -> CRITICAL + restart
+        assert stream.restarts == 1
+
+    def test_ticks_reset_heartbeat(self):
+        stream = WatchdogStream()
+        svc, metrics = self._svc(stream, warn=5.0, crit=10.0)
+        stream.connected = True
+        svc._watchdog(Phase.COLLECT, mono=100.0)
+        metrics.on_tick()                           # a tick arrives -> fresh baseline
+        # last_tick_at is monotonic 'now'; idle stays ~0 regardless of mono passed
+        svc._watchdog(Phase.COLLECT, mono=_time.monotonic() + 3.0)
+        assert stream.restarts == 0
+
+    def test_recovery_after_rebuild_is_logged_and_state_clears(self):
+        stream = WatchdogStream()
+        svc, _ = self._svc(stream)
+        stream.connected = False
+        stream.dead = True
+        svc._watchdog(Phase.COLLECT, mono=100.0)    # rebuild
+        assert stream.restarts == 1
+        stream.connected = True                     # fresh socket connects
+        svc._watchdog(Phase.COLLECT, mono=102.0)
+        assert svc._disconnected_since is None and svc._connected_since is not None
+
+    def test_watchdog_idle_outside_socket_phases(self):
+        stream = WatchdogStream()
+        svc, _ = self._svc(stream)
+        stream.connected = False
+        stream.dead = True
+        svc._watchdog(Phase.CLOSED, mono=100.0)     # socket not expected up
+        svc._watchdog(Phase.FLUSH, mono=200.0)
+        assert stream.restarts == 0
+
+    def test_kite_api_timeout_does_not_stop_controller(self):
+        """A REST failure during ATM recompute is swallowed per-underlying and
+        must never propagate out of the controller path."""
+        from algo.market_data_collector.collector_service import CollectorService
+
+        def boom(_u):
+            raise ConnectionError("simulated Kite ReadTimeout")
+
+        eng = _sqlite()
+        atm = AtmWindowManager(
+            instrument_service=FakeInstrService(), expiry_resolver=lambda u, d: date(2026, 7, 21),
+            spot_source=boom, chain_source=_chain, strikes_each_side=10,
+        )
+        stream = WatchdogStream()
+        writer = TickWriter(engine=eng, config=WriterConfig(use_copy=False))
+        metrics = CollectorMetrics(stream=stream, writer=writer, atm=atm, underlyings=["NIFTY"])
+        svc = CollectorService(
+            config=CollectorConfig(underlyings=["NIFTY"], strikes_each_side=10),
+            engine=eng, stream=stream, writer=writer, atm=atm, metrics=metrics,
+            market_hours=MarketHoursController(MarketHoursConfig(), FakeCalendar()),
+            time_provider=FakeClock(),
+        )
+        svc._recompute_all(datetime(2026, 7, 16, 9, 20, tzinfo=IST))  # must not raise
+        assert stream.subscribed_count == 0
 
 
 # --------------------------------------------------------------------------

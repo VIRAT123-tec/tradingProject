@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class WriterConfig(BaseModel):
@@ -48,6 +48,33 @@ class MarketHoursConfig(BaseModel):
         return v
 
 
+class ReconnectConfig(BaseModel):
+    """Self-healing watchdog thresholds (all seconds). See CollectorService's
+    controller-loop watchdog. Everything here is tunable so a long outage can
+    never leave the collector silently dead."""
+
+    model_config = ConfigDict(frozen=True)
+
+    # How long is_connected() may stay False before the watchdog force-rebuilds
+    # the websocket (KiteTicker's own reconnect gets this long to recover first).
+    grace_seconds: float = Field(default=60.0, gt=0)
+    # Minimum gap between two forced rebuilds -- guards against a tight restart
+    # loop when connectivity is genuinely down.
+    restart_backoff_seconds: float = Field(default=5.0, gt=0)
+    # Connected but silent: no tick for this long -> WARNING (soft heads-up).
+    heartbeat_warning_seconds: float = Field(default=20.0, gt=0)
+    # ...for this long -> CRITICAL + force a rebuild (frozen-reactor recovery).
+    heartbeat_critical_seconds: float = Field(default=60.0, gt=0)
+
+    @model_validator(mode="after")
+    def _critical_after_warning(self) -> ReconnectConfig:
+        if self.heartbeat_critical_seconds < self.heartbeat_warning_seconds:
+            raise ValueError(
+                "reconnect.heartbeat_critical_seconds must be >= heartbeat_warning_seconds"
+            )
+        return self
+
+
 class MetricsConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -74,6 +101,7 @@ class CollectorConfig(BaseModel):
     tick_mode: Literal["FULL", "QUOTE", "LTP"] = "FULL"
     recompute_interval_seconds: float = Field(default=30.0, gt=0)
     writer: WriterConfig = Field(default_factory=WriterConfig)
+    reconnect: ReconnectConfig = Field(default_factory=ReconnectConfig)
     market_hours: MarketHoursConfig = Field(default_factory=MarketHoursConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     timescale: TimescaleConfig = Field(default_factory=TimescaleConfig)

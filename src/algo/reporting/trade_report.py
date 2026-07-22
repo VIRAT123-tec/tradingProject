@@ -12,6 +12,7 @@ Columns, in exact order:
 
     S.no | Date | Instrument | Entry Time | Entry Price | Exit Time | Exit Price
     | Exit Reason | P&L (₹) | Total Profit (₹) | Total Loss (₹) | Net P&L (₹)
+    | P&L Per Share (₹)
 
 * **Date** -- the position's ``trade_date`` as ``DD-MM-YYYY``.
 * **Instrument** -- rebuilt (never read from the stored broker symbol, whose
@@ -37,6 +38,10 @@ values the strategy already produced -- nothing is recomputed:
 * **Total Loss (₹)** -- running cumulative *absolute* loss (positive, for
   readability).
 * **Net P&L (₹)** -- running cumulative net = Total Profit - Total Loss.
+* **P&L Per Share (₹)** -- this trade's own ``P&L (₹)`` divided by the contract
+  lot size (``P&L / lot_size``, two decimals). Additive: it never alters the
+  existing total-P&L columns; blank if the lot size is unknown/zero. Because it
+  is derived from the same trade-level P&L, both leg rows carry the same value.
 
 Because the report is per-leg, both leg rows of a trade carry the same
 trade-level values (exactly as Exit Reason is shared) and the running totals
@@ -67,6 +72,7 @@ from openpyxl import Workbook
 from sqlalchemy import select
 
 from algo.common.enums import OptionType, PositionState
+from algo.common.utilities import pnl_per_share
 from algo.database.models.position import Position
 from algo.database.models.strategy_instance import StrategyInstance
 from algo.database.models.trade import Trade
@@ -79,10 +85,11 @@ _IST = pytz.timezone("Asia/Kolkata")
 _COLUMNS = (
     "S.no", "Date", "Instrument", "Entry Time", "Entry Price", "Exit Time", "Exit Price",
     "Exit Reason", "P&L (₹)", "Total Profit (₹)", "Total Loss (₹)", "Net P&L (₹)",
+    "P&L Per Share (₹)",
 )
 # 1-indexed columns rendered as money (two decimals): Entry Price, Exit Price,
-# P&L, Total Profit, Total Loss, Net P&L.
-_MONEY_COLUMNS = (5, 7, 9, 10, 11, 12)
+# P&L, Total Profit, Total Loss, Net P&L, P&L Per Share.
+_MONEY_COLUMNS = (5, 7, 9, 10, 11, 12, 13)
 
 # CE before PE, matching the report's leg ordering example.
 _LEG_ORDER = {OptionType.CE: 0, OptionType.PE: 1}
@@ -114,7 +121,7 @@ class _LegRow:
 
     __slots__ = (
         "instrument", "trade_date", "entry_time", "entry_price", "exit_time", "exit_price",
-        "exit_reason", "pnl", "total_profit", "total_loss", "net_pnl",
+        "exit_reason", "pnl", "total_profit", "total_loss", "net_pnl", "pnl_per_share",
     )
 
     def __init__(
@@ -131,6 +138,7 @@ class _LegRow:
         total_profit: Decimal,
         total_loss: Decimal,
         net_pnl: Decimal,
+        pnl_per_share: Decimal | None,
     ) -> None:
         self.instrument = instrument
         self.trade_date = trade_date
@@ -143,6 +151,7 @@ class _LegRow:
         self.total_profit = total_profit
         self.total_loss = total_loss
         self.net_pnl = net_pnl
+        self.pnl_per_share = pnl_per_share
 
 
 class TradeReportExporter:
@@ -242,6 +251,10 @@ class TradeReportExporter:
                 elif pnl < 0:
                     total_loss += -pnl
                 net_pnl = total_profit - total_loss
+                # Per-share P&L for THIS trade (both legs share it), from the
+                # position's own realized P&L and lot size. Additive: it does not
+                # touch the cumulative columns above.
+                per_share = pnl_per_share(pnl, position.lot_size)
                 exit_reason = position.exit_reason.value if position.exit_reason is not None else ""
 
                 legs = sorted(
@@ -284,6 +297,7 @@ class TradeReportExporter:
                             total_profit=total_profit,
                             total_loss=total_loss,
                             net_pnl=net_pnl,
+                            pnl_per_share=per_share,
                         )
                     )
         return rows
@@ -334,6 +348,9 @@ class TradeReportExporter:
                     float(row.total_profit.quantize(Decimal("0.01"))),
                     float(row.total_loss.quantize(Decimal("0.01"))),
                     float(row.net_pnl.quantize(Decimal("0.01"))),
+                    # Blank (not 0) when the lot size is unknown, so a missing
+                    # value is never mistaken for a real ₹0.00 per-share result.
+                    float(row.pnl_per_share) if row.pnl_per_share is not None else None,
                 ]
             )
             # Always show two decimals on every money column.

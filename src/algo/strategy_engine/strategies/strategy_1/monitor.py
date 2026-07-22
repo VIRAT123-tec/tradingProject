@@ -78,6 +78,7 @@ class _MonitoredPosition:
     strike: Decimal | None
     expiry: date | None
     quantity: int | None
+    lot_size: int | None
     entry_premium: Decimal | None
     entry_time: datetime | None
 
@@ -211,6 +212,7 @@ class PositionMonitor:
             put_symbol=monitored.put_instrument.tradingsymbol,
             entry_premium=monitored.entry_premium,
             entry_time=monitored.entry_time,
+            lot_size=monitored.lot_size,
         )
         return AttachOutcome.MONITORING
 
@@ -434,6 +436,7 @@ class PositionMonitor:
             strike=position.strike,
             expiry=position.expiry_date,
             quantity=position.quantity,
+            lot_size=position.lot_size,
             entry_premium=position.combined_entry_premium,
             entry_time=position.entry_completed_at,
         )

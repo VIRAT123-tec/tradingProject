@@ -33,6 +33,7 @@ class KiteMarketTickerProtocol(Protocol):
     on_close: Any
     on_error: Any
     on_reconnect: Any
+    on_noreconnect: Any
 
     def connect(self, threaded: bool = ..., **kwargs: Any) -> None: ...
     def close(self, *args: Any, **kwargs: Any) -> None: ...
@@ -60,6 +61,7 @@ class CollectorTickStream:
         on_connect: Callable[[], None] | None = None,
         on_disconnect: Callable[[], None] | None = None,
         on_reconnect: Callable[[], None] | None = None,
+        on_noreconnect: Callable[[], None] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._ticker_factory = ticker_factory
@@ -68,12 +70,16 @@ class CollectorTickStream:
         self._on_connect = on_connect
         self._on_disconnect = on_disconnect
         self._on_reconnect = on_reconnect
+        self._on_noreconnect = on_noreconnect
         self._logger = logger if logger is not None else logging.getLogger("algo.collector.ticks")
 
         self._lock = threading.Lock()
         self._ticker: KiteMarketTickerProtocol | None = None
         self._connected = False
         self._subscribed: set[int] = set()
+        # Set (on the ticker thread) when KiteTicker permanently gives up
+        # reconnecting; read by the watchdog to trigger an immediate rebuild.
+        self._dead = threading.Event()
 
     # -- Lifecycle -----------------------------------------------------
 
@@ -81,14 +87,41 @@ class CollectorTickStream:
         with self._lock:
             if self._ticker is not None:
                 return
-            ticker = self._ticker_factory()
-            ticker.on_ticks = self._handle_ticks
-            ticker.on_connect = self._handle_connect
-            ticker.on_close = self._handle_close
-            ticker.on_error = self._handle_error
-            ticker.on_reconnect = self._handle_reconnect
-            self._ticker = ticker
-            ticker.connect(threaded=True)
+            self._spawn_locked()
+
+    def restart(self) -> None:
+        """Destroy the current (dead/frozen) websocket and build a BRAND-NEW one.
+
+        The old KiteTicker is never reused: it is closed and discarded, then the
+        factory constructs a fresh KiteTicker (which re-reads the access token,
+        i.e. re-authenticates). The intended subscription set is deliberately
+        preserved so the new socket re-subscribes every instrument on connect.
+        """
+        with self._lock:
+            old = self._ticker
+            self._ticker = None
+            self._connected = False  # never expose the dead socket as connected
+        if old is not None:
+            try:
+                old.close()
+            except Exception:  # noqa: BLE001 -- tearing down a dead socket must not raise
+                self._logger.warning("error closing dead collector ticker", exc_info=True)
+        with self._lock:
+            self._logger.info("creating fresh KiteTicker (re-authenticating)")
+            self._spawn_locked()  # keeps self._subscribed intact
+
+    def _spawn_locked(self) -> None:
+        """Build + wire + connect a new ticker. Caller must hold self._lock."""
+        self._dead.clear()
+        ticker = self._ticker_factory()
+        ticker.on_ticks = self._handle_ticks
+        ticker.on_connect = self._handle_connect
+        ticker.on_close = self._handle_close
+        ticker.on_error = self._handle_error
+        ticker.on_reconnect = self._handle_reconnect
+        ticker.on_noreconnect = self._handle_noreconnect
+        self._ticker = ticker
+        ticker.connect(threaded=True)
 
     def stop(self) -> None:
         with self._lock:
@@ -96,6 +129,7 @@ class CollectorTickStream:
             self._ticker = None
             self._connected = False
             self._subscribed.clear()
+            self._dead.clear()
         if ticker is not None:
             try:
                 ticker.close()
@@ -104,6 +138,10 @@ class CollectorTickStream:
 
     def is_connected(self) -> bool:
         return self._connected
+
+    def is_dead(self) -> bool:
+        """True once KiteTicker has permanently stopped reconnecting."""
+        return self._dead.is_set()
 
     @property
     def subscribed_count(self) -> int:
@@ -148,6 +186,7 @@ class CollectorTickStream:
 
     def _handle_connect(self, ws: Any, response: Any) -> None:
         self._connected = True
+        self._dead.clear()  # a successful connect clears any prior give-up state
         self._logger.info("collector ticker connected")
         with self._lock:
             ticker = self._ticker
@@ -155,17 +194,30 @@ class CollectorTickStream:
         if ticker is not None and tokens:
             ticker.subscribe(tokens)
             ticker.set_mode(self._mode_const(ticker), tokens)
+            self._logger.info("collector subscribed %d instruments", len(tokens))
         if self._on_connect is not None:
             self._on_connect()
 
     def _handle_reconnect(self, ws: Any, attempts: Any) -> None:
-        self._logger.info("collector ticker reconnecting (attempt %s)", attempts)
+        self._logger.info("collector ticker reconnect attempt #%s", attempts)
         if self._on_reconnect is not None:
             self._on_reconnect()
 
+    def _handle_noreconnect(self, ws: Any = None) -> None:
+        """KiteTicker has exhausted its reconnect budget and stopped forever.
+        Flag the socket dead so the watchdog rebuilds it immediately instead of
+        waiting out the grace window."""
+        self._connected = False
+        self._dead.set()
+        self._logger.critical(
+            "collector ticker gave up reconnecting (KiteTicker on_noreconnect) -- socket is dead"
+        )
+        if self._on_noreconnect is not None:
+            self._on_noreconnect()
+
     def _handle_close(self, ws: Any, code: Any, reason: Any) -> None:
         self._connected = False
-        self._logger.info("collector ticker closed: %s %s", code, reason)
+        self._logger.info("collector ticker closed (network disconnected): %s %s", code, reason)
         if self._on_disconnect is not None:
             self._on_disconnect()
 

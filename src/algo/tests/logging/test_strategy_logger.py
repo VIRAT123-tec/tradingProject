@@ -98,11 +98,12 @@ def _build(captured, *, market_data=None, spot=_DEFAULT_SPOT, min_interval=3.0):
     return obs, time_provider, handler
 
 
-def _attach(obs, *, entry_premium=Decimal("208.80"), quantity=75) -> None:
+def _attach(obs, *, entry_premium=Decimal("208.80"), quantity=75, lot_size=75) -> None:
     obs.on_attach(
         position_id=4, strike=Decimal("24200"), expiry=date(2026, 7, 16), quantity=quantity,
         call_symbol="NIFTY2671424200CE", put_symbol="NIFTY2671424200PE",
         entry_premium=entry_premium, entry_time=datetime(2026, 7, 10, 11, 25, 3, tzinfo=_IST),
+        lot_size=lot_size,
     )
 
 
@@ -306,7 +307,30 @@ class TestOnClose:
         assert "Entry Premium : 208.80" in text
         assert "Exit Premium  : 187.50" in text
         assert "Total P&L (Rs) : +1597.50" in text
+        # 1597.50 / 75 = 21.30 -- additive line, Total P&L unchanged above.
+        assert "P&L Per Share (Rs) : +21.30" in text
         assert "Holding Time : 2h 17m 15s" in text
+
+    def test_pnl_per_share_uses_lot_size(self, captured):
+        # Validation example 2: lot_size 50, P&L -2500 -> -50.00.
+        obs, _time, handler = _build(captured)
+        _attach(obs, lot_size=50)
+        obs.on_close(
+            reason=ExitReason.STOPLOSS, exit_premium=Decimal("250"),
+            exit_time=datetime(2026, 7, 10, 13, 0, 0, tzinfo=_IST), realized_pnl=Decimal("-2500"),
+        )
+        text = handler.records[-1].getMessage()
+        assert "Total P&L (Rs) : -2500.00" in text  # existing line unchanged
+        assert "P&L Per Share (Rs) : -50.00" in text
+
+    def test_pnl_per_share_is_na_when_lot_size_unknown(self, captured):
+        obs, _time, handler = _build(captured)
+        _attach(obs, lot_size=None)  # unknown lot size -> n/a, never a bogus 0
+        obs.on_close(
+            reason=ExitReason.TARGET, exit_premium=Decimal("100"),
+            exit_time=datetime(2026, 7, 10, 13, 0, 0, tzinfo=_IST), realized_pnl=Decimal("1000"),
+        )
+        assert "P&L Per Share (Rs) : n/a" in handler.records[-1].getMessage()
 
     def test_cutoff_reason_displays_as_cutoff_not_timeout(self, captured):
         obs, _time, handler = _build(captured)

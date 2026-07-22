@@ -38,6 +38,17 @@ writer:
   db_retry_base_seconds: 0.5  # writer backoff when the DB is unreachable
   db_retry_max_seconds: 10.0
 
+# Self-healing websocket watchdog (all seconds). The controller loop watches the
+# socket every iteration; if it stays down past grace_seconds -- or KiteTicker
+# permanently gives up (on_noreconnect) -- the watchdog destroys the dead socket
+# and builds a brand-new KiteTicker (fresh auth + resubscribe all). Heartbeat
+# thresholds catch a "connected but frozen" reactor that never delivers ticks.
+reconnect:
+  grace_seconds: 60             # is_connected==False this long -> force a rebuild
+  restart_backoff_seconds: 5    # minimum gap between two forced rebuilds
+  heartbeat_warning_seconds: 20 # connected but no tick this long -> WARNING
+  heartbeat_critical_seconds: 60 # ...this long -> CRITICAL + force a rebuild
+
 # Automatic trading-session lifecycle (IST). Holiday-aware via the trading
 # calendar. No manual start/stop needed.
 market_hours:

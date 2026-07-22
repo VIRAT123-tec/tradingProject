@@ -68,6 +68,7 @@ def _make_closed_position(
     realized_pnl: Decimal | None = None,
     exit_reason: ExitReason = ExitReason.TARGET,
     trade_date: date = TRADE_DATE,
+    lot_size: int | None = 75,
 ) -> int:
     """Persist a (StrategyInstance, Position, CE leg, PE leg) graph and return
     the position id. Legs carry the SELL entry / BUY exit averages and the
@@ -88,6 +89,7 @@ def _make_closed_position(
             expiry_date=expiry,
             strike=strike,
             quantity=75,
+            lot_size=lot_size,
             exit_reason=exit_reason,
             realized_pnl=realized_pnl,
             exit_completed_at=exit_completed_at,
@@ -158,18 +160,47 @@ class TestExportDay:
 
         assert path == tmp_path / "trades_13-07-2026.xlsx"
         rows = _read_rows(path)
-        assert rows[0] == list(_COLUMNS)  # 12 columns incl. the new trade-level ones
-        # Two legs -> two data rows, CE before PE; the last five columns are
-        # trade-level so both legs carry the same values.
+        assert rows[0] == list(_COLUMNS)  # 13 columns incl. the appended P&L Per Share
+        # Two legs -> two data rows, CE before PE; the trade-level columns
+        # (incl. the appended per-share = 1350/75 = 18.00) are shared by both legs.
         assert len(rows) == 3
         assert rows[1] == [
             1, "13-07-2026", "NFO:NIFTY26071424200CE", "09:20:00", 80.00, "12:30:00", 77.00,
-            "TARGET", 1350.00, 1350.00, 0.00, 1350.00,
+            "TARGET", 1350.00, 1350.00, 0.00, 1350.00, 18.00,
         ]
         assert rows[2] == [
             2, "13-07-2026", "NFO:NIFTY26071424200PE", "09:20:00", 100.00, "12:30:00", 85.00,
-            "TARGET", 1350.00, 1350.00, 0.00, 1350.00,
+            "TARGET", 1350.00, 1350.00, 0.00, 1350.00, 18.00,
         ]
+
+    def test_pnl_per_share_column(self, tmp_path):
+        # Validation example 1: lot_size 65, P&L 1300 -> 20.00. Both legs share
+        # it; the existing P&L column (index 8) is unchanged.
+        sf = _factory()
+        _make_closed_position(
+            sf, instrument="NIFTY", exchange=Exchange.NFO, strike=Decimal("24200"),
+            ce_entry=Decimal("80"), ce_exit=Decimal("77"),
+            pe_entry=Decimal("100"), pe_exit=Decimal("85"),
+            realized_pnl=Decimal("1300"), lot_size=65,
+        )
+        rows = _read_rows(
+            TradeReportExporter(session_factory=sf, output_dir=tmp_path).export_day(TRADE_DATE)
+        )
+        assert rows[1][8] == 1300.00 and rows[1][12] == 20.00
+        assert rows[2][12] == 20.00
+
+    def test_pnl_per_share_blank_when_lot_size_missing(self, tmp_path):
+        sf = _factory()
+        _make_closed_position(
+            sf, instrument="NIFTY", exchange=Exchange.NFO, strike=Decimal("24200"),
+            ce_entry=Decimal("80"), ce_exit=Decimal("77"),
+            pe_entry=Decimal("100"), pe_exit=Decimal("85"),
+            realized_pnl=Decimal("1300"), lot_size=None,
+        )
+        rows = _read_rows(
+            TradeReportExporter(session_factory=sf, output_dir=tmp_path).export_day(TRADE_DATE)
+        )
+        assert rows[1][12] is None and rows[2][12] is None  # blank, never a bogus 0.00
 
     def test_prices_render_with_two_decimals(self, tmp_path):
         sf = _factory()

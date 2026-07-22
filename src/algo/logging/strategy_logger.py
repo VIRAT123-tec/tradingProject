@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from algo.common.enums import ExitReason
+from algo.common.utilities import pnl_per_share
 
 if TYPE_CHECKING:
     import logging
@@ -86,6 +87,7 @@ class _PositionSnapshot:
     put_symbol: str
     entry_premium: Decimal | None
     entry_time: datetime | None
+    lot_size: int | None = None
 
     cycle: int = 0
     last_log_at: datetime | None = None
@@ -132,6 +134,7 @@ class PositionMonitorLogger:
         put_symbol: str,
         entry_premium: Decimal | None,
         entry_time: datetime | None,
+        lot_size: int | None = None,
     ) -> None:
         """Reset per-position tracking -- called once, right after
         ``PositionMonitor.attach()`` confirms it is watching a position."""
@@ -139,7 +142,7 @@ class PositionMonitorLogger:
             self._snapshot = _PositionSnapshot(
                 position_id=position_id, strike=strike, expiry=expiry, quantity=quantity,
                 call_symbol=call_symbol, put_symbol=put_symbol,
-                entry_premium=entry_premium, entry_time=entry_time,
+                entry_premium=entry_premium, entry_time=entry_time, lot_size=lot_size,
                 ws_connected_last=self._safe_is_connected(),
             )
         except Exception:  # noqa: BLE001 -- observability must never break attach()
@@ -228,6 +231,7 @@ class PositionMonitorLogger:
                 f"Maximum Loss Seen (Rs)   : {_fmt_money(snap.pnl_low)}",
                 "",
                 f"Total P&L (Rs) : {_fmt_money(realized_pnl)}",
+                f"P&L Per Share (Rs) : {_fmt_money(pnl_per_share(realized_pnl, snap.lot_size))}",
                 "",
                 f"Holding Time : {holding}",
                 _BAR,

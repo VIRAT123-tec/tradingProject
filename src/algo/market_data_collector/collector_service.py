@@ -68,6 +68,12 @@ class CollectorService:
         self._last_recompute = 0.0
         self._last_metrics = 0.0
 
+        # -- Watchdog state (monotonic seconds) --
+        self._disconnected_since: float | None = None  # when is_connected() first went False
+        self._connected_since: float | None = None     # when the current socket came up
+        self._last_restart = 0.0                        # last forced rebuild (for backoff)
+        self._hb_level = 0                              # 0 ok / 1 warned / 2 critical (rising-edge log)
+
     # -- Lifecycle -----------------------------------------------------
 
     def start(self) -> None:
@@ -115,6 +121,7 @@ class CollectorService:
                 phase = self._hours.phase(now)
                 self._on_phase(phase)
                 mono = _time.monotonic()
+                self._watchdog(phase, mono)
                 if phase is Phase.COLLECT and mono - self._last_recompute >= self._cfg.recompute_interval_seconds:
                     self._recompute_all(now)
                     self._last_recompute = mono
@@ -141,6 +148,91 @@ class CollectorService:
             self._stream.stop()
             self._atm.reset()
         # FREEZE: stop recomputing (no action); FLUSH: writer keeps draining.
+
+    # -- Self-healing watchdog -----------------------------------------
+
+    def _watchdog(self, phase: Phase, mono: float) -> None:
+        """Supervise the websocket from inside the controller loop.
+
+        KiteTicker's own reconnect gets ``grace_seconds`` to recover a drop. If
+        it can't -- or it permanently gives up (``on_noreconnect`` -> is_dead) --
+        the watchdog destroys the dead socket and builds a brand-new one. A
+        connected-but-silent socket (frozen reactor) is caught by the heartbeat.
+        """
+        rc = self._cfg.reconnect
+        if phase not in (Phase.CONNECT, Phase.COLLECT, Phase.FREEZE):
+            # Socket isn't expected up (pre-open / flush / closed): reset state so
+            # the next session's watchdog starts from a clean slate.
+            self._disconnected_since = self._connected_since = None
+            self._hb_level = 0
+            return
+
+        dead = self._stream.is_dead()
+        connected = self._stream.is_connected()
+
+        if connected and not dead:
+            if self._connected_since is None:
+                if self._disconnected_since is not None:
+                    self._logger.info("collector tick stream restored (connected)")
+                self._connected_since = mono
+                self._hb_level = 0
+            self._disconnected_since = None
+            if phase is Phase.COLLECT and self._heartbeat_stalled(mono, rc):
+                self._restart_stream(mono, reason="heartbeat critical (frozen reactor)")
+            return
+
+        # Unhealthy: disconnected, or KiteTicker gave up reconnecting.
+        self._connected_since = None
+        if self._disconnected_since is None:
+            self._disconnected_since = mono
+            self._logger.info("collector network disconnected; awaiting reconnect")
+        down_for = mono - self._disconnected_since
+
+        if not (dead or down_for >= rc.grace_seconds):
+            return  # inside the grace window -- let KiteTicker keep trying
+        if mono - self._last_restart < rc.restart_backoff_seconds:
+            return  # honour restart backoff; retry next iteration
+        reason = "on_noreconnect (gave up)" if dead else (
+            f"disconnected {down_for:.0f}s >= grace {rc.grace_seconds:.0f}s"
+        )
+        self._logger.warning("collector reconnect unsuccessful; watchdog taking over")
+        self._restart_stream(mono, reason=reason)
+
+    def _heartbeat_stalled(self, mono: float, rc) -> bool:  # noqa: ANN001 -- ReconnectConfig
+        """Connected but no ticks: WARNING then CRITICAL (rising-edge logs).
+        Returns True at the CRITICAL threshold so the caller forces a rebuild."""
+        baseline = self._metrics.last_tick_at
+        if baseline <= 0.0:  # no tick yet -> measure from when the socket came up
+            baseline = self._connected_since if self._connected_since is not None else mono
+        idle = mono - baseline
+        if idle >= rc.heartbeat_critical_seconds:
+            if self._hb_level < 2:
+                self._logger.critical(
+                    "collector connected but no tick for %.0fs (frozen reactor?)", idle
+                )
+                self._hb_level = 2
+            return True
+        if idle >= rc.heartbeat_warning_seconds:
+            if self._hb_level < 1:
+                self._logger.warning("collector connected but no tick for %.0fs", idle)
+                self._hb_level = 1
+            return False
+        self._hb_level = 0
+        return False
+
+    def _restart_stream(self, mono: float, *, reason: str) -> None:
+        """Destroy the dead websocket and bring up a brand-new KiteTicker.
+        Never restarts the process. Subscriptions are restored automatically by
+        the fresh socket's on_connect (the intended set is preserved)."""
+        self._logger.critical("watchdog restarting websocket: %s", reason)
+        self._stream.restart()
+        self._metrics.on_restart()
+        self._last_restart = mono
+        # Fresh socket gets its own grace + heartbeat baseline once it connects;
+        # force an ATM recompute next COLLECT loop so edge rotation resumes.
+        self._disconnected_since = self._connected_since = None
+        self._hb_level = 0
+        self._last_recompute = 0.0
 
     def _recompute_all(self, now: datetime) -> None:
         today = now.date()

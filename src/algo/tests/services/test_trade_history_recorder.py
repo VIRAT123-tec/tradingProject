@@ -151,6 +151,8 @@ class TestRecordsClosedTrade:
         assert r.combined_exit_premium == Decimal("160.0000")
         assert r.exit_reason is ExitReason.TIMEOUT
         assert r.realized_pnl == Decimal("2600.0000")
+        # Additive: realized_pnl (above) is unchanged; per-share = 2600 / 65 = 40.00.
+        assert r.pnl_per_share == Decimal("40.00")
         assert r.call_entry_price == Decimal("110.0000")
         assert r.put_exit_price == Decimal("70.0000")
         assert r.entry_spot_ltp == Decimal("24137.5500")

@@ -135,6 +135,11 @@ class TradeHistory(Base, TimestampMixin):
     # --- Outcome (+ derived profit_percent) ---
     exit_reason: Mapped[ExitReason | None] = mapped_column(enum_column(ExitReason), nullable=True)
     realized_pnl: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    pnl_per_share: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4), nullable=True,
+        doc="realized_pnl / lot_size, rounded to two decimals -- additive analytics "
+        "alongside (never replacing) realized_pnl. NULL when lot_size is unknown/zero.",
+    )
     profit_percent: Mapped[Decimal | None] = mapped_column(
         Numeric(10, 4), nullable=True,
         doc="realized_pnl as a percent of premium collected "
