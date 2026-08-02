@@ -36,6 +36,7 @@ than hardcoded in code:
 
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import date, timedelta
 from decimal import Decimal
@@ -56,7 +57,10 @@ if TYPE_CHECKING:
     from algo.brokers.kite.kite_auth import AccessTokenStore
     from algo.brokers.kite.kite_broker import KiteClientProtocol
     from algo.brokers.kite.market_ticker import KiteTickStream
-    from algo.scheduler.trading_calendar import TradingCalendar
+    from algo.scheduler.trading_calendar import TradingCalendar  # noqa: F401 -- kept for reference
+    from algo.services.holiday_service import HolidayService
+
+_logger = logging.getLogger("algo.expiry")
 
 
 class InstrumentConfig(BaseModel):
@@ -193,10 +197,12 @@ class ConfigExpiryService:
         self,
         *,
         instrument_service: ConfigInstrumentService,
-        trading_calendar: TradingCalendar,
+        holiday_service: HolidayService,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._instruments = instrument_service
-        self._calendar = trading_calendar
+        self._holidays = holiday_service
+        self._logger = logger if logger is not None else _logger
 
     def get_current_weekly_expiry(self, instrument: str, as_of: date) -> date:
         """The current expiry to trade for ``instrument`` as of ``as_of``.
@@ -210,6 +216,7 @@ class ConfigExpiryService:
         exchange holiday to the previous trading day.
         """
         weekday = self._instruments.expiry_weekday(instrument)
+        exchange = self._instruments.get_instrument_spec(instrument).exchange
         if self._instruments.expiry_cadence(instrument) == "monthly":
             expiry = self._monthly_expiry_on_or_after(as_of, weekday)
         else:
@@ -218,12 +225,21 @@ class ConfigExpiryService:
             # convention the seam documents).
             days_ahead = (weekday - as_of.weekday()) % 7
             expiry = as_of + timedelta(days=days_ahead)
-        # Holiday shift: if the expiry day is not a trading day, the exchange
-        # convention is to move the expiry to the previous trading day.
+        # Holiday shift: if the computed expiry is not a trading day on THIS
+        # instrument's exchange (weekend or an NSE/BSE holiday), the exchange
+        # convention is to move the expiry to the previous trading day. Uses the
+        # single HolidayService source of truth -- no holiday logic duplicated.
+        original = expiry
         guard = 0
-        while not self._calendar.is_trading_day(expiry) and guard < 14:
+        while not self._holidays.is_trading_day(expiry, exchange) and guard < 14:
             expiry -= timedelta(days=1)
             guard += 1
+        if expiry != original:
+            self._logger.info(
+                "Weekly expiry shifted for %s: original=%s adjusted=%s reason=exchange "
+                "holiday (%s)",
+                instrument, original.isoformat(), expiry.isoformat(), exchange.value,
+            )
         return expiry
 
     @staticmethod

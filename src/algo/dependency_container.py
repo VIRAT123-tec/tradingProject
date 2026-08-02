@@ -68,6 +68,7 @@ from algo.reporting.trade_report import TradeReportExporter
 from algo.risk.kill_switch import KillSwitch
 from algo.risk.risk_core import RiskCore, RiskCoreConfig
 from algo.scheduler import PlatformScheduler, SchedulerConfig
+from algo.scheduler.trading_calendar import WeekdayTradingCalendar
 from algo.services.live_seams import BrokerSpotPriceProvider
 from algo.services.order_update_processor import OrderUpdateProcessor
 from algo.services.reconciliation_engine import ReconciliationEngine
@@ -84,6 +85,7 @@ if TYPE_CHECKING:
 
     from algo.brokers.kite.kite_auth import AccessTokenStore
     from algo.market_data.websocket_manager import TickStream
+    from algo.scheduler.trading_calendar import TradingCalendar
     from algo.services.expiry_service import ExpiryService
     from algo.services.instrument_service import InstrumentService
     from algo.services.pricing_service import SpotPriceProvider
@@ -257,6 +259,7 @@ class DependencyContainer:
         time_provider: TimeProvider | None = None,
         scheduler_config: SchedulerConfig | None = None,
         monitoring_scheduler_config: MonitoringSchedulerConfig | None = None,
+        trading_calendar: TradingCalendar | None = None,
         broker: BrokerBase | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -425,8 +428,14 @@ class DependencyContainer:
         )
 
         # -- Scheduler ------------------------------------------------------
+        # Holiday awareness enters here purely by injection: a holiday-aware
+        # TradingCalendar makes the scheduler skip entry/exit triggers on
+        # exchange holidays (no broker calls), with no scheduler code change.
+        # Defaults to weekday-only so callers that pass nothing are unchanged.
         self.scheduler = PlatformScheduler(
-            time_provider=self.time_provider, config=scheduler_config
+            time_provider=self.time_provider,
+            config=scheduler_config,
+            trading_calendar=trading_calendar or WeekdayTradingCalendar(),
         )
 
         # -- Monitoring scheduler (intraday stop-loss/target heartbeat) ------

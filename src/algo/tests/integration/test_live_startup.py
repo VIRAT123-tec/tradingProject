@@ -29,7 +29,7 @@ from algo.common.enums import ExitReason, Exchange, OptionType, PositionState
 from algo.database.repositories.position_repository import PositionRepository
 from algo.database.repositories.strategy_instance_repository import StrategyInstanceRepository
 from algo.market_data.polling_tick_stream import PollingTickStream
-from algo.scheduler.trading_calendar import WeekdayTradingCalendar
+from algo.services.holiday_service import HolidayService
 from algo.services.live_seams import ConfigExpiryService, ConfigInstrumentService
 from algo.strategy_engine.strategy_scheduler import MonitoringSchedulerConfig
 from algo.tests.integration.conftest import (
@@ -136,7 +136,7 @@ class TestRealSeamsStartupFlow:
             # The real seams, exactly as start_paper.build_seams() supplies them:
             instrument_service=instruments,
             expiry_service=ConfigExpiryService(instrument_service=instruments,
-                                               trading_calendar=WeekdayTradingCalendar()),
+                                               holiday_service=HolidayService()),
             tick_stream=PollingTickStream(),
             spot_price_provider=None,  # let the container build the broker-backed one
             monitoring_scheduler_config=MonitoringSchedulerConfig(interval_seconds=0.05),

@@ -458,3 +458,62 @@ class TestPartialExit:
         broker_positions = h.broker.get_positions()
         assert len(broker_positions) == 1
         assert broker_positions[0].tradingsymbol == h.pe_symbol
+
+
+class TestMoneyPathCloseFillPriceGuard:
+    """Money-path integrity: a COMPLETE close with no usable fill price must not
+    be recorded as a 0 exit (which would corrupt realized P&L / trade history);
+    the position is left for reconciliation instead of finalized with wrong
+    numbers."""
+
+    def test_case_c_complete_close_without_price_does_not_finalize(self):
+        from algo.common.enums import OrderStatus, TransactionType
+        from algo.database.repositories.reconciliation_break_repository import (
+            ReconciliationBreakRepository,
+        )
+
+        h = build_open_position()
+        h.price_source.set_price(h.ce_id, Decimal("60"))
+        h.price_source.set_price(h.pe_id, Decimal("55"))
+
+        # After the real entry, make every COMPLETE close report no fill price.
+        orig = h.broker.get_order
+
+        def _no_close_price(broker_order_id, *, timeout=None):
+            bo = orig(broker_order_id, timeout=timeout)
+            if (
+                bo is not None
+                and bo.status is OrderStatus.COMPLETE
+                and bo.transaction_type is TransactionType.BUY
+            ):
+                return bo.model_copy(update={"average_price": None})
+            return bo
+
+        h.broker.get_order = _no_close_price
+
+        result = h.exit_logic.exit(ExitReason.TARGET)
+
+        # Not exited: the position is frozen for reconciliation, NOT finalized
+        # with a wrong (0-based) realized P&L or exit premium.
+        assert result.outcome is not ExitOutcome.EXITED
+        position = _position(h)
+        assert position.state is PositionState.ERROR
+        assert position.realized_pnl is None            # no wrong P&L written
+        assert position.combined_exit_premium is None   # no wrong exit premium written
+        assert _instance_status(h) is InstanceStatus.FROZEN
+        with h.session_factory() as s:
+            breaks = ReconciliationBreakRepository(s).list_for_position(position.id)
+        assert len(breaks) >= 1                          # reconciliation path preserved
+
+    def test_case_d_valid_close_price_exits_with_unchanged_math(self):
+        h = build_open_position()
+        h.price_source.set_price(h.ce_id, Decimal("60"))
+        h.price_source.set_price(h.pe_id, Decimal("55"))
+
+        result = h.exit_logic.exit(ExitReason.TARGET)
+
+        assert result.outcome is ExitOutcome.EXITED
+        position = _position(h)
+        assert position.state is PositionState.CLOSED
+        assert position.combined_exit_premium == Decimal("115")  # 60 + 55, unchanged
+        assert position.realized_pnl == Decimal("8625")          # (230-115)*75, unchanged

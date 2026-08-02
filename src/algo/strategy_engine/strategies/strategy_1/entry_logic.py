@@ -88,6 +88,7 @@ from algo.database.session import unit_of_work
 from algo.services.order_update_processor import reconcile_order_terminal
 from algo.strategy_engine.strategies.strategy_1.combined_premium import compute_thresholds
 from algo.strategy_engine.strategies.strategy_1.config import Strategy1Config
+from algo.strategy_engine.strategies.strategy_1.exceptions import MissingFillPriceError
 from algo.strategy_engine.strategies.strategy_1.state_machine import PositionStateMachine
 
 if TYPE_CHECKING:
@@ -506,7 +507,29 @@ class EntryLogic:
             order_repo = OrderRepository(session)
             order = order_repo.get_by_id_or_raise(order_id)
             if order.status is OrderStatus.COMPLETE:
-                fill_price = order.average_price or Decimal("0")
+                # Money-path integrity: a COMPLETE order MUST carry a usable fill
+                # price. A real option fill is always > 0; None (broker/DB gave
+                # no price) or <= 0 (e.g. a push-path 0-coercion) must NEVER be
+                # silently turned into a 0 entry premium -- that would corrupt
+                # combined_entry_premium and the target/stoploss levels. Fail
+                # loud instead: raising freezes this instance (StrategyRunner
+                # fault isolation) with the position left ENTRY_PENDING, so the
+                # existing recovery + reconciliation path resolves it against
+                # broker truth rather than opening a position on a wrong number.
+                fill_price = order.average_price
+                if fill_price is None or fill_price <= 0:
+                    self._logger.critical(
+                        "MONEY-PATH INTEGRITY: COMPLETE entry order for %s has no usable "
+                        "fill price (order_id=%s, db_average_price=%s, broker_status=%s, "
+                        "broker_average_price=%s); NOT opening position -- leaving "
+                        "ENTRY_PENDING for recovery/reconciliation",
+                        self._identity, broker_order_id, order.average_price,
+                        broker_order.status.value, broker_order.average_price,
+                    )
+                    raise MissingFillPriceError(
+                        f"COMPLETE entry order {broker_order_id} for {self._identity} "
+                        f"has no usable fill price (average_price={order.average_price})"
+                    )
                 return _LegResult(_LegOutcome.FILLED, "filled", fill_price=fill_price)
             # REJECTED / CANCELLED after ack: no standing exposure from a
             # zero-filled entry order. The order row was already reconciled

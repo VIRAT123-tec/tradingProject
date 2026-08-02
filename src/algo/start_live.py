@@ -54,7 +54,7 @@ def build_seams() -> dict[str, object]:
     minted by the daily login.
     """
     from algo.brokers.kite.kite_auth import EnvAccessTokenStore
-    from algo.scheduler.trading_calendar import WeekdayTradingCalendar
+    from algo.services.holiday_service import HolidayAwareTradingCalendar, HolidayService
     from algo.services.live_seams import (
         ConfigExpiryService,
         ConfigInstrumentService,
@@ -63,11 +63,13 @@ def build_seams() -> dict[str, object]:
 
     instruments = ConfigInstrumentService()
     access_token_store = EnvAccessTokenStore()
+    holiday_service = HolidayService.from_config()
     return {
         "instrument_service": instruments,
         "expiry_service": ConfigExpiryService(
-            instrument_service=instruments, trading_calendar=WeekdayTradingCalendar()
+            instrument_service=instruments, holiday_service=holiday_service
         ),
+        "trading_calendar": HolidayAwareTradingCalendar(holiday_service),
         "tick_stream": build_kite_tick_stream(access_token_store=access_token_store),
         "access_token_store": access_token_store,
     }
@@ -95,8 +97,13 @@ def main() -> int:
 
     configure_logging(logging.INFO, alert_dispatcher=RecordingAlertDispatcher())
 
+    from algo.database.migration_guard import guard_database_schema
+
     try:
         _check_live_trading_confirmed()
+        # Fail fast BEFORE any DI/broker login/scheduler/websocket if the
+        # database schema is behind the code's Alembic head.
+        guard_database_schema()
         container = DependencyContainer(**build_seams())
     except Exception:
         _logger.critical("live trading failed to initialize", exc_info=True)

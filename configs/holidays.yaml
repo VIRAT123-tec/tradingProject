@@ -1,2 +1,45 @@
-# TODO: exchange holiday calendar (NSE/BSE), used by holiday_service.py to
-# prevent entry logic from running on non-trading days.
+# Exchange trading-holiday calendar -- the SINGLE source of truth for holiday
+# awareness (loaded by algo.services.holiday_service.HolidayService).
+#
+# Adding/removing a holiday is a ONE-LINE edit here -- no code change. Dates are
+# ISO (YYYY-MM-DD). Keys are the holiday-calendar exchanges NSE and BSE; the
+# service maps the F&O segments to them (NFO -> NSE, BFO -> BSE), so NIFTY /
+# BANKNIFTY / FINNIFTY / MIDCPNIFTY follow NSE and SENSEX / SENSEXBANK follow BSE.
+#
+# ⚠️ CONFIRM every date against the OFFICIAL NSE/BSE trading-holiday circular
+# before live use. Fixed-date holidays (Republic Day, Independence Day, Gandhi
+# Jayanti, Christmas) are reliable; movable-festival dates below are indicative
+# and MUST be verified -- a wrong date here silently mis-shifts an expiry or
+# skips/allows a trading day. NSE and BSE publish the same list in practice, so
+# the two sections are kept identical; diverge them only if a real circular does.
+
+holidays:
+  NSE:
+    - 2026-01-26   # Republic Day
+    - 2026-03-04   # Holi (verify)
+    - 2026-03-21   # Id-ul-Fitr / Ramzan (verify)
+    - 2026-04-01   # Annual bank closing / Ram Navami (verify)
+    - 2026-04-14   # Dr. Ambedkar Jayanti / Mahavir Jayanti (verify)
+    - 2026-05-01   # Maharashtra Day (verify)
+    - 2026-08-15   # Independence Day
+    - 2026-09-14   # Ganesh Chaturthi (verify)
+    - 2026-10-02   # Gandhi Jayanti
+    - 2026-10-21   # Dussehra (verify)
+    - 2026-11-09   # Diwali / Laxmi Pujan (verify)
+    - 2026-11-24   # Guru Nanak Jayanti (verify)
+    - 2026-12-25   # Christmas
+
+  BSE:
+    - 2026-01-26   # Republic Day
+    - 2026-03-04   # Holi (verify)
+    - 2026-03-21   # Id-ul-Fitr / Ramzan (verify)
+    - 2026-04-01   # Annual bank closing / Ram Navami (verify)
+    - 2026-04-14   # Dr. Ambedkar Jayanti / Mahavir Jayanti (verify)
+    - 2026-05-01   # Maharashtra Day (verify)
+    - 2026-08-15   # Independence Day
+    - 2026-09-14   # Ganesh Chaturthi (verify)
+    - 2026-10-02   # Gandhi Jayanti
+    - 2026-10-21   # Dussehra (verify)
+    - 2026-11-09   # Diwali / Laxmi Pujan (verify)
+    - 2026-11-24   # Guru Nanak Jayanti (verify)
+    - 2026-12-25   # Christmas

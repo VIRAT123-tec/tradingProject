@@ -23,7 +23,7 @@ import yaml
 
 from algo.dependency_container import AppConfig
 from algo.risk.risk_core import RiskCoreConfig
-from algo.scheduler.trading_calendar import WeekdayTradingCalendar
+from algo.services.holiday_service import HolidayService
 from algo.services.live_seams import ConfigExpiryService, ConfigInstrumentService
 from algo.strategy_engine.parameter_loader import ParameterLoader
 from algo.strategy_engine.strategies.strategy_1.config import Strategy1Config
@@ -93,7 +93,7 @@ class TestExpiryCadence:
     @pytest.fixture(scope="class")
     def expiry(self, instrument_service) -> ConfigExpiryService:
         return ConfigExpiryService(
-            instrument_service=instrument_service, trading_calendar=WeekdayTradingCalendar()
+            instrument_service=instrument_service, holiday_service=HolidayService()
         )
 
     def test_weekly_instruments_stay_weekly(self, instrument_service):

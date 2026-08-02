@@ -84,6 +84,7 @@ from algo.database.repositories.strategy_instance_repository import (
 from algo.database.session import unit_of_work
 from algo.services.order_update_processor import reconcile_order_terminal
 from algo.strategy_engine.strategies.strategy_1.config import Strategy1Config
+from algo.strategy_engine.strategies.strategy_1.exceptions import MissingFillPriceError
 from algo.strategy_engine.strategies.strategy_1.state_machine import PositionStateMachine
 
 if TYPE_CHECKING:
@@ -488,7 +489,13 @@ class ExitLogic:
             return None
         terminal = self._poll_until_terminal(existing.broker_order_id)
         if terminal is not None and terminal.status is OrderStatus.COMPLETE:
-            price = terminal.average_price or Decimal("0")
+            price = terminal.average_price
+            if price is None or price <= 0:
+                # Closed at the broker but no usable fill price: do NOT record a
+                # 0 exit price (it would corrupt realized P&L). Treat as
+                # unconfirmed so exit()'s aggregation records a reconciliation
+                # break and freezes -- recovery/reconciliation resolves it.
+                return self._close_fill_without_price(leg, terminal)
             self._record_close_fill(leg, terminal.broker_order_id, price, terminal)
             return _LegCloseResult(_LegCloseOutcome.CLOSED, "adopted prior fill", exit_price=price)
         return _LegCloseResult(
@@ -576,7 +583,10 @@ class ExitLogic:
                 f"close order {broker_order_id} acknowledged but not terminal in poll window",
             )
         if terminal.status is OrderStatus.COMPLETE:
-            price = terminal.average_price or Decimal("0")
+            price = terminal.average_price
+            if price is None or price <= 0:
+                # See _adopt_existing_order: never record a 0 exit price.
+                return self._close_fill_without_price(leg, terminal)
             self._record_close_fill(leg, broker_order_id, price, terminal)
             return _LegCloseResult(_LegCloseOutcome.CLOSED, "closed", exit_price=price)
         # A close order that came back REJECTED/CANCELLED did not close the leg.
@@ -588,6 +598,27 @@ class ExitLogic:
             broker_order_id=broker_order_id, broker_order=terminal,
         )
         return _LegCloseResult(_LegCloseOutcome.FAILED, f"terminal {terminal.status.value}")
+
+    def _close_fill_without_price(self, leg: _ExitLegIds, terminal) -> _LegCloseResult:
+        """A close came back COMPLETE but with no usable fill price.
+
+        The leg IS flat at the broker, but recording a 0 exit price would
+        corrupt realized P&L -- so we deliberately do NOT persist the close.
+        Returning AMBIGUOUS routes through ``exit()``'s aggregation, which
+        records a reconciliation break and freezes the instance; recovery
+        re-runs the exit and reconciliation resolves the real fill price against
+        broker truth. A real option close price is always > 0, so this only
+        fires on a genuine broker/data fault."""
+        self._logger.critical(
+            "MONEY-PATH INTEGRITY: COMPLETE close of leg %s for %s has no usable fill "
+            "price (order_id=%s, broker_status=%s, broker_average_price=%s); NOT "
+            "recording exit -- leaving for reconciliation",
+            leg.option_type.value, self._identity, terminal.broker_order_id,
+            terminal.status.value, terminal.average_price,
+        )
+        return _LegCloseResult(
+            _LegCloseOutcome.AMBIGUOUS, "closed at broker but no usable fill price reported"
+        )
 
     def _record_close_fill(
         self, leg: _ExitLegIds, broker_order_id: str, exit_price: Decimal, broker_order
@@ -651,8 +682,22 @@ class ExitLogic:
                     raise RuntimeError(f"position {prepared.position_id} vanished before finalize")
 
                 trades = position_repo.list_trades_for_position(position.id)
-                combined_exit = sum((t.exit_price or Decimal("0") for t in trades), Decimal("0"))
-                realized = sum((t.realized_pnl or Decimal("0") for t in trades), Decimal("0"))
+                # Money-path integrity: never total over a missing leg value. A
+                # None exit_price / realized_pnl means a leg was not cleanly
+                # priced, and summing it as 0 would silently write a wrong
+                # combined exit premium / realized P&L into the Position and the
+                # trade history. Fail loud instead -- this raise is caught below,
+                # which records a reconciliation break and leaves the position
+                # EXIT_PENDING for recovery to resolve against broker truth.
+                for t in trades:
+                    if t.exit_price is None or t.realized_pnl is None:
+                        raise MissingFillPriceError(
+                            f"cannot finalize exit for {self._identity} position "
+                            f"{position.id}: leg {t.option_type.value} is incompletely "
+                            f"priced (exit_price={t.exit_price}, realized_pnl={t.realized_pnl})"
+                        )
+                combined_exit = sum((t.exit_price for t in trades), Decimal("0"))
+                realized = sum((t.realized_pnl for t in trades), Decimal("0"))
 
                 position.combined_exit_premium = combined_exit
                 position.realized_pnl = realized

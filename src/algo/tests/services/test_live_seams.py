@@ -16,6 +16,7 @@ from algo.brokers.exceptions import BrokerAuthenticationError, InstrumentNotFoun
 from algo.brokers.kite import mapper as kite_mapper
 from algo.brokers.kite.market_ticker import KiteTickStream
 from algo.common.enums import Exchange
+from algo.services.holiday_service import HolidayService
 from algo.services.live_seams import (
     BrokerSpotPriceProvider,
     ConfigExpiryService,
@@ -89,36 +90,25 @@ class TestBrokerSpotPriceProvider:
             provider.get_spot_ltp("NIFTY")
 
 
-class _AllWeekdaysCalendar:
-    def is_trading_day(self, day):
-        return True
-
-
-class _HolidayCalendar:
-    def __init__(self, holidays):
-        self._holidays = set(holidays)
-
-    def is_trading_day(self, day):
-        return day.weekday() < 5 and day not in self._holidays
-
-
 class TestConfigExpiryService:
     def test_nearest_expiry_weekday_on_or_after(self, tmp_path):
         svc = ConfigInstrumentService(_write_instruments(tmp_path))
-        exp = ConfigExpiryService(instrument_service=svc, trading_calendar=_AllWeekdaysCalendar())
+        exp = ConfigExpiryService(instrument_service=svc, holiday_service=HolidayService())
         # 2026-07-06 is a Monday; nifty expiry weekday 3 = Thursday -> 2026-07-09.
         assert exp.get_current_weekly_expiry("NIFTY", date(2026, 7, 6)) == date(2026, 7, 9)
 
     def test_same_day_when_as_of_is_expiry_day(self, tmp_path):
         svc = ConfigInstrumentService(_write_instruments(tmp_path))
-        exp = ConfigExpiryService(instrument_service=svc, trading_calendar=_AllWeekdaysCalendar())
+        exp = ConfigExpiryService(instrument_service=svc, holiday_service=HolidayService())
         assert exp.get_current_weekly_expiry("NIFTY", date(2026, 7, 9)) == date(2026, 7, 9)
 
     def test_holiday_shifts_expiry_earlier(self, tmp_path):
         svc = ConfigInstrumentService(_write_instruments(tmp_path))
-        # Thursday 2026-07-09 is a holiday -> expiry shifts to Wednesday 07-08.
-        cal = _HolidayCalendar([date(2026, 7, 9)])
-        exp = ConfigExpiryService(instrument_service=svc, trading_calendar=cal)
+        # Thursday 2026-07-09 is an NSE holiday -> NIFTY (NFO -> NSE) expiry
+        # shifts to Wednesday 07-08. No holiday logic duplicated: the same
+        # HolidayService the platform uses drives the shift.
+        holidays = HolidayService({"NSE": frozenset({date(2026, 7, 9)})})
+        exp = ConfigExpiryService(instrument_service=svc, holiday_service=holidays)
         assert exp.get_current_weekly_expiry("NIFTY", date(2026, 7, 6)) == date(2026, 7, 8)
 
 

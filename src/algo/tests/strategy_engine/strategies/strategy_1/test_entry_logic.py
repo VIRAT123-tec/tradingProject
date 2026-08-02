@@ -435,3 +435,52 @@ class TestPartialEntryAutoUnwind:
 
         # Net flat at the broker: CE sold then bought back.
         assert h.broker.get_positions() == []
+
+
+class TestMoneyPathEntryFillPriceGuard:
+    """Money-path integrity: a COMPLETE entry order with no usable fill price
+    must fail loud rather than record a silent 0 entry premium (which would
+    corrupt the target/stoploss levels). See MissingFillPriceError."""
+
+    @staticmethod
+    def _strip_fill_prices(broker) -> None:
+        """Make the broker report every COMPLETE order with average_price=None,
+        simulating a broker/API that acks COMPLETE but omits the fill price."""
+        orig = broker.get_order
+
+        def _get_order(broker_order_id, *, timeout=None):
+            bo = orig(broker_order_id, timeout=timeout)
+            if bo is not None and bo.status is OrderStatus.COMPLETE:
+                return bo.model_copy(update={"average_price": None})
+            return bo
+
+        broker.get_order = _get_order
+
+    def test_case_a_complete_entry_without_price_raises_and_opens_nothing(self):
+        from algo.strategy_engine.strategies.strategy_1.exceptions import (
+            MissingFillPriceError,
+        )
+
+        h = build_harness()
+        self._strip_fill_prices(h.broker)
+
+        with pytest.raises(MissingFillPriceError):
+            h.entry_logic.enter()
+
+        position = _position(h)
+        assert position is not None
+        assert position.state is PositionState.ENTRY_PENDING  # never OPEN
+        assert position.combined_entry_premium is None         # no entry premium written
+        assert position.target_premium is None                 # no target computed
+        assert position.stoploss_premium is None               # no stoploss computed
+
+    def test_case_b_valid_price_opens_position_with_unchanged_math(self):
+        h = build_harness()
+        result = h.entry_logic.enter()
+
+        assert result.outcome is EntryOutcome.ENTERED
+        position = _position(h)
+        assert position.state is PositionState.OPEN
+        assert position.combined_entry_premium == CE_PRICE + PE_PRICE  # 230, unchanged
+        assert position.target_premium == Decimal("207.00")           # 230 * 0.90
+        assert position.stoploss_premium == Decimal("253.00")         # 230 * 1.10

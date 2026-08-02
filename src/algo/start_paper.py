@@ -54,7 +54,7 @@ def build_seams() -> dict[str, object]:
     tradingsymbols instead.
     """
     from algo.brokers.kite.kite_auth import EnvAccessTokenStore
-    from algo.scheduler.trading_calendar import WeekdayTradingCalendar
+    from algo.services.holiday_service import HolidayAwareTradingCalendar, HolidayService
     from algo.services.live_seams import (
         ConfigExpiryService,
         ConfigInstrumentService,
@@ -64,11 +64,13 @@ def build_seams() -> dict[str, object]:
 
     access_token_store = EnvAccessTokenStore()
     instruments = ConfigInstrumentService()
+    holiday_service = HolidayService.from_config()
     return {
         "instrument_service": instruments,
         "expiry_service": ConfigExpiryService(
-            instrument_service=instruments, trading_calendar=WeekdayTradingCalendar()
+            instrument_service=instruments, holiday_service=holiday_service
         ),
+        "trading_calendar": HolidayAwareTradingCalendar(holiday_service),
         "tick_stream": build_kite_tick_stream(access_token_store=access_token_store),
         "broker": build_paper_trading_broker(access_token_store=access_token_store),
     }
@@ -85,7 +87,12 @@ def main() -> int:
 
     configure_logging(logging.INFO, alert_dispatcher=RecordingAlertDispatcher())
 
+    from algo.database.migration_guard import guard_database_schema
+
     try:
+        # Fail fast BEFORE any DI/broker/scheduler/websocket if the database
+        # schema is behind the code's Alembic head (prevents ORM<->DB drift).
+        guard_database_schema()
         container = DependencyContainer(**build_seams())
     except Exception:
         _logger.critical("paper trading failed to initialize", exc_info=True)

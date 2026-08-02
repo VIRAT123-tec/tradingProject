@@ -40,7 +40,7 @@ def build_collector() -> CollectorService:
     from algo.market_data_collector.market_hours import MarketHoursController
     from algo.market_data_collector.metrics import CollectorMetrics
     from algo.market_data_collector.tick_writer import TickWriter
-    from algo.scheduler.trading_calendar import WeekdayTradingCalendar
+    from algo.services.holiday_service import HolidayAwareTradingCalendar, HolidayService
     from algo.services.live_seams import ConfigExpiryService, ConfigInstrumentService
     from algo.services.time_service import SystemTimeProvider
 
@@ -49,8 +49,9 @@ def build_collector() -> CollectorService:
     initialize_schema(engine, config)
 
     instruments = ConfigInstrumentService()
-    calendar = WeekdayTradingCalendar()
-    expiry = ConfigExpiryService(instrument_service=instruments, trading_calendar=calendar)
+    holiday_service = HolidayService.from_config()
+    calendar = HolidayAwareTradingCalendar(holiday_service)
+    expiry = ConfigExpiryService(instrument_service=instruments, holiday_service=holiday_service)
     tokens = EnvAccessTokenStore()
     reader = KiteMarketReader(
         client_factory=lambda: _kite_client(tokens), instrument_service=instruments
