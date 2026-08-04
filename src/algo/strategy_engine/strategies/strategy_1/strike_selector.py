@@ -19,6 +19,7 @@ broker/service calls the rest of this module makes.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -26,6 +27,8 @@ from typing import TYPE_CHECKING
 
 from algo.brokers.exceptions import InstrumentNotFoundError
 from algo.common.enums import Exchange, OptionType
+
+_logger = logging.getLogger("algo.strike_selector")
 
 if TYPE_CHECKING:
     from algo.brokers.broker_base import BrokerBase, BrokerInstrument
@@ -134,6 +137,18 @@ class StrikeSelector:
         # The name the broker's contracts carry may differ from the display
         # identity (e.g. SENSEXBANK -> BANKEX); default to the identity.
         underlying = spec.underlying_symbol or instrument
+        # Diagnostic (entry-path only, low frequency): record exactly what we are
+        # about to ask the broker to resolve -- the COMPUTED expiry, ATM strike,
+        # and the spot/interval that produced them. Pairs with the broker's
+        # find_option_contract MISS log (which prints the LISTED expiries), so a
+        # single failed run shows computed-vs-listed side by side. Pure logging;
+        # never alters control flow.
+        _logger.info(
+            "StrikeSelector resolving %s: as_of=%s spot=%s strike_interval=%s "
+            "atm_strike=%s computed_expiry=%s (%s) underlying=%s exchange=%s",
+            instrument, as_of, spot_ltp, spec.strike_interval, atm_strike,
+            expiry, type(expiry).__name__, underlying, spec.exchange.value,
+        )
 
         call = self._resolve_contract(
             instrument=instrument,

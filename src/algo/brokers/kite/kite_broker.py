@@ -18,9 +18,10 @@ never silently re-sent.
 from __future__ import annotations
 
 import logging
+import threading
 import time as _time_module
 from collections.abc import Callable
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
@@ -60,6 +61,16 @@ _T = TypeVar("_T")
 
 # Sort key sentinel: an order with no placed_at sorts before any timestamped one.
 _MIN_AWARE = datetime.min.replace(tzinfo=timezone.utc)
+
+# IST has no DST, so a fixed +5:30 offset always yields the correct trading date.
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _ist_today() -> date:
+    """Current IST calendar date -- the notion of "trading day" the instrument
+    dump is refreshed once per (see ``KiteBroker._instrument_rows``). Matches
+    the timezone ``Position.trade_date`` is stamped in."""
+    return datetime.now(_IST).date()
 
 
 class KiteClientProtocol(Protocol):
@@ -121,6 +132,7 @@ class KiteBroker(BrokerBase):
         config: KiteBrokerConfig | None = None,
         logger: logging.Logger | None = None,
         sleep: Callable[[float], None] = _time_module.sleep,
+        today_provider: Callable[[], date] | None = None,
     ) -> None:
         self._client = client
         self._session = session
@@ -128,7 +140,24 @@ class KiteBroker(BrokerBase):
         self._config = config or KiteBrokerConfig()
         self._logger = logger if logger is not None else logging.getLogger("algo.brokers.kite")
         self._sleep = sleep
+        # Per-exchange instrument dump, auto-refreshed once per trading day (see
+        # _instrument_rows). Kite re-lists weekly contracts (NIFTY/SENSEX) as
+        # expiries roll, so a dump held for the whole process lifetime goes stale
+        # and makes find_option_contract miss the new weekly contracts.
         self._instrument_cache: dict[str, list[dict[str, Any]]] = {}
+        # The trading date each exchange's dump was loaded for; a lookup on a
+        # later date triggers exactly one refresh for that exchange.
+        self._instrument_cache_date: dict[str, date] = {}
+        # Monotonic timestamp of each exchange's last (re)load -- surfaced in the
+        # find_option_contract miss log as the dump's age.
+        self._instrument_cache_loaded_at: dict[str, float] = {}
+        # Serialises cache reads and the once-a-day refresh across the scheduler's
+        # concurrent per-instrument dispatch threads (two instruments sharing an
+        # exchange can look up simultaneously).
+        self._instrument_cache_lock = threading.Lock()
+        # "Trading day" source (injectable for tests); IST calendar date by
+        # default, matching Position.trade_date's timezone.
+        self._today_provider = today_provider if today_provider is not None else _ist_today
 
     # -- Lifecycle -----------------------------------------------------
 
@@ -312,20 +341,101 @@ class KiteBroker(BrokerBase):
                 and mapper._price_or_none(row.get("strike")) == strike
             ):
                 return mapper.to_broker_instrument(row)
+        # No exact (name, instrument_type, expiry, strike) match was found.
+        # Before failing loud (behaviour UNCHANGED -- the raise below always
+        # runs), emit a diagnostic showing what the dump DID contain for this
+        # underlying. The overwhelmingly common cause is a computed expiry that
+        # does not match any LISTED contract -- especially for WEEKLY instruments
+        # (NIFTY/SENSEX), whose weekly-expiry weekday the exchange changes and
+        # which holiday-shift more often than monthlies. This log distinguishes
+        # "requested expiry is not listed at all" (a wrong expiry weekday /
+        # holiday-shift / stale dump) from "expiry is listed but the requested
+        # strike is not" (an ATM/strike-interval problem), turning the next
+        # freeze into an at-a-glance root cause. The try/except guards ONLY the
+        # diagnostic so it can never mask or replace the real error below.
+        try:
+            listed_expiries = sorted(
+                d for d in {
+                    row.get("expiry")
+                    for row in rows
+                    if row.get("name") == underlying
+                    and row.get("instrument_type") == option_value
+                }
+                if d is not None
+            )
+            strikes_at_requested_expiry = sorted(
+                s for s in (
+                    mapper._price_or_none(row.get("strike"))
+                    for row in rows
+                    if row.get("name") == underlying
+                    and row.get("instrument_type") == option_value
+                    and row.get("expiry") == expiry
+                )
+                if s is not None
+            )
+            kite_exchange = mapper.to_kite_exchange(exchange)
+            loaded_at = self._instrument_cache_loaded_at.get(kite_exchange)
+            cache_age_s = None if loaded_at is None else _time_module.monotonic() - loaded_at
+            expiry_type = type(expiry).__name__
+            listed_type = (
+                type(listed_expiries[0]).__name__ if listed_expiries else "n/a"
+            )
+            self._logger.error(
+                "find_option_contract MISS: underlying=%s type=%s exchange=%s "
+                "requested expiry=%s (%s) strike=%s | dump_rows=%d cache_age=%s | "
+                "listed expiries for %s %s (%s): %s | strikes listed AT requested expiry: %s",
+                underlying, option_value, exchange.value, expiry, expiry_type, strike,
+                len(rows),
+                "unknown" if cache_age_s is None else f"{cache_age_s:.0f}s",
+                underlying, option_value, listed_type,
+                [d.isoformat() if hasattr(d, "isoformat") else d for d in listed_expiries],
+                strikes_at_requested_expiry or "<none -- requested expiry is NOT listed at all>",
+            )
+        except Exception:  # noqa: BLE001 -- a diagnostic must never mask the real error below
+            self._logger.error(
+                "find_option_contract MISS: underlying=%s type=%s expiry=%s strike=%s on %s "
+                "(diagnostic dump failed)",
+                underlying, option_value, expiry, strike, exchange.value, exc_info=True,
+            )
         raise InstrumentNotFoundError(
             f"no {option_value} contract for {underlying} strike={strike} expiry={expiry} "
             f"on {exchange.value}"
         )
 
+    def list_option_expiries(
+        self, *, underlying: str, exchange: Exchange, timeout: float | None = None
+    ) -> list[date]:
+        """Distinct, sorted option expiries currently listed for ``underlying``
+        on ``exchange``, read straight from the (once-per-trading-day-refreshed)
+        instrument dump -- the exchange's own source of truth.
+
+        Used to validate a computed expiry against reality before requesting a
+        contract for it (see services.live_seams.ValidatingExpiryService), so a
+        stale expiry_weekday / holiday-shift / dump can never silently drive a
+        lookup for a non-existent expiry. Scans the same rows and same name/
+        instrument_type fields find_option_contract matches on, so the two agree
+        by construction."""
+        rows = self._instrument_rows(exchange, timeout=timeout)
+        expiries = {
+            row.get("expiry")
+            for row in rows
+            if row.get("name") == underlying
+            and row.get("instrument_type") in (OptionType.CE.value, OptionType.PE.value)
+            and row.get("expiry") is not None
+        }
+        return sorted(expiries)
+
     def refresh_instruments(self, exchange: Exchange, *, timeout: float | None = None) -> int:
         """Force a reload of the cached instrument dump for one exchange (Kite's
         instrument master changes daily -- e.g. new weekly expiries). Returns
-        the number of instruments loaded. Called by scripts/sync_instruments.py."""
+        the number of instruments loaded. Called by scripts/sync_instruments.py.
+
+        Unconditional (unlike the once-a-day auto-refresh in _instrument_rows),
+        but shares the same store logic, so a manual refresh also stamps today's
+        trading date and the auto-refresh will not re-fetch again that day."""
         kite_exchange = mapper.to_kite_exchange(exchange)
-        rows = self._read(
-            lambda: self._client.instruments(kite_exchange), timeout=timeout
-        )
-        self._instrument_cache[kite_exchange] = list(rows)
+        with self._instrument_cache_lock:
+            rows = self._fetch_and_store(kite_exchange, self._today(), timeout=timeout)
         return len(rows)
 
     # -- Websocket -----------------------------------------------------
@@ -345,16 +455,62 @@ class KiteBroker(BrokerBase):
     # -- Internal ------------------------------------------------------
 
     def _instrument_rows(self, exchange: Exchange, *, timeout: float | None) -> list[dict[str, Any]]:
-        """Return the (lazily loaded, then cached) raw instrument dump for one
-        exchange. The one-time load is retried like any read; later calls hit
-        the cache."""
+        """Return the cached raw instrument dump for one exchange, refreshing it
+        at most once per trading day.
+
+        Kite re-lists weekly option contracts as expiries roll, so a dump loaded
+        yesterday no longer contains today's weekly (NIFTY/SENSEX) contracts; the
+        first lookup on a new trading date therefore reloads. Every later lookup
+        that same day hits the cache -- the refresh is once-a-day, never
+        per-lookup. Refreshes are tracked independently per exchange.
+
+        Failure policy: if the daily refresh fails but a previous dump exists,
+        the failure is logged and the previous dump is returned (a stale dump is
+        strictly better than freezing every instrument on a transient Kite
+        outage); the load date is deliberately *not* advanced, so the next lookup
+        retries the refresh. Only a failure with no usable cached dump at all
+        propagates. The one-time cold load, and each retry, use the normal
+        _read retry/timeout path unchanged.
+        """
         kite_exchange = mapper.to_kite_exchange(exchange)
-        cached = self._instrument_cache.get(kite_exchange)
-        if cached is not None:
-            return cached
-        rows = self._read(lambda: self._client.instruments(kite_exchange), timeout=timeout)
-        self._instrument_cache[kite_exchange] = list(rows)
-        return self._instrument_cache[kite_exchange]
+        today = self._today()
+        with self._instrument_cache_lock:
+            cached = self._instrument_cache.get(kite_exchange)
+            if cached is not None and self._instrument_cache_date.get(kite_exchange) == today:
+                return cached
+            # A new trading day (or a never-loaded exchange): (re)load exactly once.
+            try:
+                return self._fetch_and_store(kite_exchange, today, timeout=timeout)
+            except BrokerError:
+                if cached is not None:
+                    self._logger.warning(
+                        "instrument dump refresh failed for %s; continuing with the "
+                        "previous dump (loaded for %s) -- newly listed weekly contracts "
+                        "may be missing until the next successful refresh",
+                        kite_exchange,
+                        self._instrument_cache_date.get(kite_exchange),
+                        exc_info=True,
+                    )
+                    return cached
+                # No usable dump exists at all: cannot serve lookups -- fail loud.
+                raise
+
+    def _fetch_and_store(
+        self, kite_exchange: str, today: date, *, timeout: float | None
+    ) -> list[dict[str, Any]]:
+        """Fetch one exchange's instrument dump and store it with today's trading
+        date. Caller must hold ``self._instrument_cache_lock``. Uses the normal
+        ``_read`` retry/timeout path; on failure it raises (leaving any existing
+        cache untouched) for the caller to decide fallback vs. propagate."""
+        rows = list(self._read(lambda: self._client.instruments(kite_exchange), timeout=timeout))
+        self._instrument_cache[kite_exchange] = rows
+        self._instrument_cache_date[kite_exchange] = today
+        self._instrument_cache_loaded_at[kite_exchange] = _time_module.monotonic()
+        return rows
+
+    def _today(self) -> date:
+        """Current trading date (injected clock; IST calendar date by default)."""
+        return self._today_provider()
 
     def _chunk(self, instruments: list[InstrumentIdentifier]):
         size = self._config.quote_batch_size

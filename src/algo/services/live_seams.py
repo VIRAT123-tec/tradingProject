@@ -41,7 +41,7 @@ import threading
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Callable, Literal, Protocol
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -50,11 +50,12 @@ from algo.brokers.broker_base import InstrumentIdentifier
 from algo.brokers.exceptions import InstrumentNotFoundError
 from algo.brokers.kite import mapper as kite_mapper
 from algo.common.enums import Exchange
-from algo.services.instrument_service import InstrumentSpec
+from algo.services.instrument_service import InstrumentService, InstrumentSpec
 
 if TYPE_CHECKING:
     from algo.brokers.broker_base import BrokerBase
     from algo.brokers.kite.kite_auth import AccessTokenStore
+    from algo.services.expiry_service import ExpiryService
     from algo.brokers.kite.kite_broker import KiteClientProtocol
     from algo.brokers.kite.market_ticker import KiteTickStream
     from algo.scheduler.trading_calendar import TradingCalendar  # noqa: F401 -- kept for reference
@@ -259,6 +260,150 @@ class ConfigExpiryService:
             month = 1 if as_of.month == 12 else as_of.month + 1
             expiry = self._last_weekday_of_month(year, month, weekday)
         return expiry
+
+
+# ---------------------------------------------------------------------------
+# Instrument-master validation of the computed expiry (source of truth = dump)
+# ---------------------------------------------------------------------------
+
+
+class ListedExpiryProvider(Protocol):
+    """Minimal seam over a broker's instrument master: "which option expiries
+    does the exchange currently list for this underlying?" Satisfied directly by
+    ``BrokerBase.list_option_expiries`` (``None`` = the broker cannot enumerate,
+    e.g. the simulation broker)."""
+
+    def list_option_expiries(
+        self, *, underlying: str, exchange: Exchange, timeout: float | None = None
+    ) -> list[date] | None: ...
+
+
+class ExpiryNotListedError(Exception):
+    """Raised when a *computed* expiry is not among the expiries the exchange's
+    instrument master actually lists for the underlying -- i.e. the platform
+    computed an expiry that does not exist on the exchange.
+
+    Carries the structured facts (``computed_expiry``, ``listed_expiries``,
+    ``instrument``/``underlying``/``exchange``/``as_of``) and, in its message,
+    a fully-formed, operator-actionable diagnosis: the computed expiry, the
+    nearest expiries the exchange *does* list, and the likely reason. This is
+    the loud, precise replacement for the opaque ``InstrumentNotFoundError`` a
+    phantom expiry used to produce three layers deeper.
+    """
+
+    def __init__(
+        self,
+        *,
+        instrument: str,
+        underlying: str,
+        exchange: Exchange,
+        computed_expiry: date,
+        listed: list[date],
+        as_of: date,
+    ) -> None:
+        self.instrument = instrument
+        self.underlying = underlying
+        self.exchange = exchange
+        self.computed_expiry = computed_expiry
+        self.listed_expiries = list(listed)
+        self.as_of = as_of
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        computed = self.computed_expiry
+        if not self.listed_expiries:
+            nearest = "<none: the exchange lists NO option contracts for this underlying>"
+            reason = (
+                f"the underlying symbol {self.underlying!r} matched no option contracts "
+                f"in the {self.exchange.value} instrument dump -- likely a wrong "
+                "underlying_symbol in configs/instruments/*.yaml, or an empty/stale "
+                "instrument dump"
+            )
+        else:
+            closest = min(self.listed_expiries, key=lambda d: abs((d - computed).days))
+            nearby = sorted(self.listed_expiries, key=lambda d: abs((d - computed).days))[:5]
+            nearest = ", ".join(f"{d.isoformat()} ({d:%a})" for d in sorted(nearby))
+            if abs((closest - computed).days) <= 4:
+                reason = (
+                    f"the exchange lists a nearby expiry on {closest.isoformat()} "
+                    f"({closest:%a}) but not the computed {computed:%a} "
+                    f"{computed.isoformat()} -- the configured expiry_weekday is likely "
+                    "stale, or a holiday shift diverged from the exchange's own adjustment"
+                )
+            else:
+                reason = (
+                    "the computed expiry is far from every listed expiry -- the instrument "
+                    "dump may be stale, or expiry_weekday/expiry_cadence is misconfigured "
+                    "for this instrument"
+                )
+        return (
+            f"computed expiry {computed.isoformat()} ({computed:%a}) for {self.instrument} "
+            f"(underlying {self.underlying} on {self.exchange.value}, as_of "
+            f"{self.as_of.isoformat()}) is NOT listed on the exchange. Nearest listed "
+            f"expiries: {nearest}. Likely reason: {reason}. Refusing to request a contract "
+            "for a non-existent expiry."
+        )
+
+
+class ValidatingExpiryService:
+    """``ExpiryService`` decorator that validates the inner service's computed
+    expiry against the exchange's live instrument master (the source of truth),
+    failing loudly if it does not exist rather than letting a phantom expiry
+    reach ``find_option_contract`` as an opaque ``InstrumentNotFoundError`` that
+    freezes the instance with no explanation.
+
+    Drop-in: it implements the same ``ExpiryService`` seam, so ``strike_selector``
+    / ``entry_logic`` need no change. Instrument- and cadence-agnostic --
+    validation is a pure set-membership check against the listed dates, identical
+    for weekly and monthly. If the provider cannot enumerate expiries
+    (``list_option_expiries`` returns ``None`` -- e.g. the simulation broker),
+    validation is skipped and behaviour is exactly as before: this is a strict
+    safety addition, never a regression.
+
+    It never guesses and never silently substitutes a different expiry: a
+    mismatch raises ``ExpiryNotListedError`` (which propagates through
+    strike_selector -> entry_logic -> StrategyRunner, preserving the existing
+    freeze for a genuine failure, but now with a precise, actionable message).
+    """
+
+    def __init__(
+        self,
+        *,
+        inner: "ExpiryService",
+        instrument_service: InstrumentService,
+        listed_provider: ListedExpiryProvider,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._inner = inner
+        self._instruments = instrument_service
+        self._listed = listed_provider
+        self._logger = logger if logger is not None else _logger
+
+    def get_current_weekly_expiry(self, instrument: str, as_of: date) -> date:
+        computed = self._inner.get_current_weekly_expiry(instrument, as_of)
+        spec = self._instruments.get_instrument_spec(instrument)
+        underlying = spec.underlying_symbol or instrument
+        listed = self._listed.list_option_expiries(
+            underlying=underlying, exchange=spec.exchange
+        )
+        if listed is None:
+            # The broker cannot enumerate its instrument master (simulation):
+            # nothing to validate against, so preserve prior behaviour exactly.
+            return computed
+        if computed in listed:
+            return computed
+        error = ExpiryNotListedError(
+            instrument=instrument,
+            underlying=underlying,
+            exchange=spec.exchange,
+            computed_expiry=computed,
+            listed=listed,
+            as_of=as_of,
+        )
+        # Log at the point of detection too, so the cause is visible even if a
+        # caller were to translate the exception before the runner logs it.
+        self._logger.critical("%s", error)
+        raise error
 
 
 # ---------------------------------------------------------------------------

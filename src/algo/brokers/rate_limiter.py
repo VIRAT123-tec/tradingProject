@@ -145,6 +145,7 @@ class RateLimitedBroker(BrokerBase):
         "get_ltp": RateLimitCategory.MARKET_DATA,
         "get_instrument": RateLimitCategory.INSTRUMENT_LOOKUP,
         "find_option_contract": RateLimitCategory.INSTRUMENT_LOOKUP,
+        "list_option_expiries": RateLimitCategory.INSTRUMENT_LOOKUP,
     }
 
     def __init__(self, inner: BrokerBase, config: RateLimitConfig) -> None:
@@ -257,6 +258,14 @@ class RateLimitedBroker(BrokerBase):
             option_type=option_type,
             exchange=exchange,
             timeout=timeout,
+        )
+
+    def list_option_expiries(
+        self, *, underlying: str, exchange: Exchange, timeout: float | None = None
+    ) -> list[date] | None:
+        self._throttle("list_option_expiries", timeout)
+        return self._inner.list_option_expiries(
+            underlying=underlying, exchange=exchange, timeout=timeout
         )
 
     def connect_websocket(self, *, timeout: float | None = None) -> None:

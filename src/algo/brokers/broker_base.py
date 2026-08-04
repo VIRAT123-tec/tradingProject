@@ -485,6 +485,31 @@ class BrokerBase(abc.ABC):
         """
         raise NotImplementedError
 
+    def list_option_expiries(
+        self, *, underlying: str, exchange: Exchange, timeout: float | None = None
+    ) -> list[date] | None:
+        """Return the sorted, distinct option expiry dates the broker's
+        instrument master currently lists for ``underlying`` on ``exchange`` --
+        or ``None`` if this broker cannot enumerate its instrument master.
+
+        This is the source-of-truth companion to ``find_option_contract``: it
+        lets a caller confirm a *computed* expiry actually exists on the
+        exchange before requesting a contract for it, turning an otherwise
+        opaque ``InstrumentNotFoundError`` (and the strategy freeze it triggers)
+        into a precise, actionable failure.
+
+        Deliberately a concrete method with a default of ``None`` -- "this
+        broker cannot enumerate expiries" -- rather than an abstract one, so a
+        broker without a real instrument dump (the simulation broker) and any
+        caller are unaffected and simply skip validation. A concrete broker
+        backed by a real dump (Kite) overrides it. An empty list is distinct
+        from ``None``: it means the master IS enumerable but lists no option
+        contracts for ``underlying`` (a wrong underlying symbol, or an empty/
+        stale dump) -- a genuine, reportable condition, not "unsupported".
+        Read-only, freely retryable. Rate-limit category: INSTRUMENT_LOOKUP.
+        """
+        return None
+
     # -- Websocket (order-update push) ------------------------------------
     # Tick/LTP streaming is a separate concern owned by
     # market_data/websocket_manager.py; this lifecycle is for real-time

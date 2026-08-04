@@ -69,7 +69,7 @@ from algo.risk.kill_switch import KillSwitch
 from algo.risk.risk_core import RiskCore, RiskCoreConfig
 from algo.scheduler import PlatformScheduler, SchedulerConfig
 from algo.scheduler.trading_calendar import WeekdayTradingCalendar
-from algo.services.live_seams import BrokerSpotPriceProvider
+from algo.services.live_seams import BrokerSpotPriceProvider, ValidatingExpiryService
 from algo.services.order_update_processor import OrderUpdateProcessor
 from algo.services.reconciliation_engine import ReconciliationEngine
 from algo.services.time_service import SystemTimeProvider
@@ -413,6 +413,18 @@ class DependencyContainer:
 
         # -- Strategy engine ----------------------------------------------------
         self._instrument_service = instrument_service
+        # Guard against ever resolving an expiry the exchange does not list (the
+        # weekly-rollover freeze): validate every computed expiry against the
+        # broker's live instrument master (source of truth) before it can reach
+        # find_option_contract. Drop-in over the ExpiryService seam, so no
+        # strategy/entry/strike code changes; degrades to the raw service when the
+        # broker cannot enumerate expiries (simulation).
+        self.expiry_service: ExpiryService = ValidatingExpiryService(
+            inner=expiry_service,
+            instrument_service=instrument_service,
+            listed_provider=self.broker,
+            logger=self._logger,
+        )
         self.instance_factory = InstanceFactory(
             session_factory=self.session_factory,
             broker=self.broker,
@@ -420,7 +432,7 @@ class DependencyContainer:
             risk=self.risk_core,
             time_provider=self.time_provider,
             instrument_service=instrument_service,
-            expiry_service=expiry_service,
+            expiry_service=self.expiry_service,
             spot_price_provider=self._spot_price_provider,
             trade_exporter=self.trade_exporter,
             trade_history_recorder=self.trade_history_recorder,

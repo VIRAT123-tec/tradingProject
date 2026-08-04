@@ -170,7 +170,12 @@ def _kite_order(**overrides):
     return base
 
 
-def build_broker(client: FakeKiteClient | None = None, *, token: str | None = "TODAY_TOKEN"):
+def build_broker(
+    client: FakeKiteClient | None = None,
+    *,
+    token: str | None = "TODAY_TOKEN",
+    today_provider=None,
+):
     client = client or FakeKiteClient()
     session = KiteSession(client=client, api_secret="secret", token_store=DictTokenStore(token=token))
     ticker = FakeTicker()
@@ -179,6 +184,7 @@ def build_broker(client: FakeKiteClient | None = None, *, token: str | None = "T
         client=client, session=session, order_stream=stream,
         config=KiteBrokerConfig(read_retry_attempts=3, read_retry_delay_seconds=0.0),
         sleep=lambda s: None,
+        today_provider=today_provider,
     )
     return broker, client, ticker
 
@@ -418,12 +424,112 @@ class TestInstrumentLookup:
         )
         assert inst.tradingsymbol == "NIFTY26JUL24000PE"
 
+    def _next_week_instruments(self):
+        """The dump as it would look after the weekly expiry rolls over: the
+        old weekly contracts are gone, a new weekly expiry is listed."""
+        return [
+            {"instrument_token": 3, "exchange": "NFO", "tradingsymbol": "NIFTY26AUG24500CE", "name": "NIFTY",
+             "lot_size": 75, "tick_size": 0.05, "expiry": date(2026, 8, 6), "strike": 24500.0, "instrument_type": "CE"},
+            {"instrument_token": 4, "exchange": "NFO", "tradingsymbol": "NIFTY26AUG24500PE", "name": "NIFTY",
+             "lot_size": 75, "tick_size": 0.05, "expiry": date(2026, 8, 6), "strike": 24500.0, "instrument_type": "PE"},
+        ]
+
     def test_instrument_dump_is_cached(self):
         client = FakeKiteClient(instruments_result=self._instruments())
         broker, _, _ = build_broker(client)
         broker.get_instrument(Exchange.NFO, "NIFTY26JUL24000CE")
         broker.get_instrument(Exchange.NFO, "NIFTY26JUL24000PE")
         assert client.instruments_call_count == 1  # loaded once, then cached
+
+    def test_dump_not_refreshed_more_than_once_per_day(self):
+        # Many lookups on the same trading date -> exactly one instruments() call.
+        client = FakeKiteClient(instruments_result=self._instruments())
+        broker, _, _ = build_broker(client, today_provider=lambda: date(2026, 7, 27))
+        for _ in range(5):
+            broker.get_instrument(Exchange.NFO, "NIFTY26JUL24000CE")
+        assert client.instruments_call_count == 1
+
+    def test_dump_refreshes_on_new_trading_day(self):
+        # A long-running process crosses into a new trading day after the weekly
+        # expiry rolled: the newly listed weekly contract must resolve, not miss.
+        day = {"d": date(2026, 7, 27)}
+        client = FakeKiteClient(instruments_result=self._instruments())
+        broker, _, _ = build_broker(client, today_provider=lambda: day["d"])
+
+        first = broker.find_option_contract(
+            underlying="NIFTY", expiry=date(2026, 7, 30), strike=Decimal("24000"),
+            option_type=OptionType.CE, exchange=Exchange.NFO,
+        )
+        assert first.tradingsymbol == "NIFTY26JUL24000CE"
+        assert client.instruments_call_count == 1
+
+        # New trading day + Kite has re-listed the weekly expiry.
+        day["d"] = date(2026, 8, 3)
+        client.instruments_result = self._next_week_instruments()
+
+        rolled = broker.find_option_contract(
+            underlying="NIFTY", expiry=date(2026, 8, 6), strike=Decimal("24500"),
+            option_type=OptionType.CE, exchange=Exchange.NFO,
+        )
+        assert rolled.tradingsymbol == "NIFTY26AUG24500CE"
+        assert client.instruments_call_count == 2  # refreshed exactly once for the new day
+
+    def test_refresh_failure_falls_back_to_previous_dump(self):
+        # New trading day but the refresh fails transiently: rather than freeze,
+        # serve the previous dump and log; a subsequent lookup retries.
+        day = {"d": date(2026, 7, 27)}
+        client = FakeKiteClient(instruments_result=self._instruments())
+        broker, _, _ = build_broker(client, today_provider=lambda: day["d"])
+        broker.get_instrument(Exchange.NFO, "NIFTY26JUL24000CE")  # cold load succeeds
+
+        day["d"] = date(2026, 8, 3)
+        client.instruments_result = _Raise(req_exc.ConnectionError("down"))
+
+        # No exception -- the previous dump is still returned.
+        inst = broker.get_instrument(Exchange.NFO, "NIFTY26JUL24000CE")
+        assert inst.tradingsymbol == "NIFTY26JUL24000CE"
+
+        # The date was NOT advanced, so the next lookup retries -- and now succeeds.
+        client.instruments_result = self._next_week_instruments()
+        rolled = broker.find_option_contract(
+            underlying="NIFTY", expiry=date(2026, 8, 6), strike=Decimal("24500"),
+            option_type=OptionType.CE, exchange=Exchange.NFO,
+        )
+        assert rolled.tradingsymbol == "NIFTY26AUG24500CE"
+
+    def test_refresh_failure_with_no_cache_propagates(self):
+        # A cold load that fails has no previous dump to fall back on -> fail loud.
+        client = FakeKiteClient(instruments_result=_Raise(req_exc.ConnectionError("down")))
+        broker, _, _ = build_broker(client, today_provider=lambda: date(2026, 7, 27))
+        with pytest.raises(BrokerConnectionError):
+            broker.get_instrument(Exchange.NFO, "NIFTY26JUL24000CE")
+
+    def test_list_option_expiries_distinct_sorted(self):
+        rows = self._instruments() + self._next_week_instruments()
+        broker, _, _ = build_broker(FakeKiteClient(instruments_result=rows))
+        expiries = broker.list_option_expiries(underlying="NIFTY", exchange=Exchange.NFO)
+        assert expiries == [date(2026, 7, 30), date(2026, 8, 6)]  # distinct across CE/PE, sorted
+
+    def test_list_option_expiries_unknown_underlying_is_empty(self):
+        broker, _, _ = build_broker(FakeKiteClient(instruments_result=self._instruments()))
+        # Enumerable but nothing lists this underlying -> [] (distinct from None).
+        assert broker.list_option_expiries(underlying="BANKEX", exchange=Exchange.NFO) == []
+
+    def test_refresh_is_independent_per_exchange(self):
+        # Loading BFO must not mark NFO fresh, and vice versa.
+        day = {"d": date(2026, 7, 27)}
+        client = FakeKiteClient(instruments_result=self._instruments())
+        broker, _, _ = build_broker(client, today_provider=lambda: day["d"])
+        broker.get_instrument(Exchange.NFO, "NIFTY26JUL24000CE")
+        broker.get_instrument(Exchange.BFO, "NIFTY26JUL24000CE")  # BFO has same fake rows
+        assert client.instruments_call_count == 2  # one per exchange
+
+        # New day: each exchange refreshes independently, exactly once.
+        day["d"] = date(2026, 8, 3)
+        broker.get_instrument(Exchange.NFO, "NIFTY26JUL24000CE")
+        assert client.instruments_call_count == 3  # only NFO refreshed
+        broker.get_instrument(Exchange.BFO, "NIFTY26JUL24000CE")
+        assert client.instruments_call_count == 4  # then BFO
 
 
 # --------------------------------------------------------------------------
